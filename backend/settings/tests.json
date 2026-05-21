@@ -1,0 +1,12 @@
+{
+  "tests": [
+    {
+      "name": "GET settings",
+      "method": "GET",
+      "path": "/",
+      "expectedStatus": 200,
+      "expectedBody": {"artnet_ip": "192.168.1.10"},
+      "bodyMatcher": "partial"
+    }
+  ]
+}

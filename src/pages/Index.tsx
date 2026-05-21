@@ -1,6 +1,7 @@
-import { useState, useEffect, useCallback } from "react";
+import { useState, useEffect, useCallback, useRef } from "react";
 import Icon from "@/components/ui/icon";
 import { useWebAudio } from "@/hooks/useWebAudio";
+import { presetsApi, historyApi, settingsApi, artnetApi, type ApiPreset, type ApiEvent, type ApiSettings } from "@/lib/api";
 
 // ─── Types ───────────────────────────────────────────────────────────────────
 type TabId = "dmx" | "audio" | "library" | "settings" | "history" | "scene3d";
@@ -244,6 +245,8 @@ function DmxPanel() {
   const [channels, setChannels] = useState<DmxChannel[]>(INITIAL_CHANNELS);
   const [masterValue, setMasterValue] = useState(255);
   const [blackout, setBlackout] = useState(false);
+  const [sending, setSending] = useState(false);
+  const [sendResult, setSendResult] = useState<{ ok: boolean; msg: string } | null>(null);
 
   const updateChannel = (id: number, value: number) => {
     setChannels(prev => prev.map(ch => ch.id === id ? { ...ch, value } : ch));
@@ -254,6 +257,21 @@ function DmxPanel() {
     purple: "#a855f7",
     amber: "#f59e0b",
     green: "#22c55e",
+  };
+
+  const handleSendArtNet = async () => {
+    setSending(true);
+    setSendResult(null);
+    const dmxValues = channels.map(ch => blackout ? 0 : Math.round(ch.value * masterValue / 255));
+    const res = await artnetApi.send(dmxValues);
+    setSendResult(res.ok
+      ? { ok: true, msg: `Отправлено ${dmxValues.length} каналов` }
+      : { ok: false, msg: res.error || "Ошибка" }
+    );
+    if (res.ok) {
+      await historyApi.add("manual", `DMX отправлен: ${dmxValues.length} каналов через Art-Net`);
+    }
+    setSending(false);
   };
 
   return (
@@ -328,6 +346,22 @@ function DmxPanel() {
             {label}
           </button>
         ))}
+      </div>
+
+      {/* Art-Net send */}
+      <div className="mt-2 flex gap-2 items-center">
+        <button onClick={handleSendArtNet} disabled={sending}
+          className="flex-1 py-2 font-display text-[10px] tracking-widest border rounded transition-all flex items-center justify-center gap-2"
+          style={{ borderColor: "rgba(0,255,255,0.4)", color: "#00ffff", background: "rgba(0,255,255,0.06)" }}
+        >
+          <Icon name="Send" size={12} />
+          {sending ? "ОТПРАВКА..." : "ОТПРАВИТЬ ART-NET"}
+        </button>
+        {sendResult && (
+          <span className="font-mono-tech text-[10px]" style={{ color: sendResult.ok ? "#22c55e" : "#ef4444" }}>
+            {sendResult.msg}
+          </span>
+        )}
       </div>
     </div>
   );
@@ -602,7 +636,39 @@ function LibraryPanel() {
   const [search, setSearch] = useState("");
   const [typeFilter, setTypeFilter] = useState<string>("ALL");
 
-  const filteredPresets = PRESETS.filter(p =>
+  const [presets, setPresets] = useState<ApiPreset[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [newName, setNewName] = useState("");
+  const [creating, setCreating] = useState(false);
+  const [deleting, setDeleting] = useState<number | null>(null);
+
+  useEffect(() => {
+    presetsApi.list().then(data => { setPresets(data); setLoading(false); }).catch(() => setLoading(false));
+  }, []);
+
+  const handleDelete = async (id: number, e: React.MouseEvent) => {
+    e.stopPropagation();
+    setDeleting(id);
+    await presetsApi.delete(id);
+    setPresets(prev => prev.filter(p => p.id !== id));
+    if (activePreset === id) setActivePreset(null);
+    setDeleting(null);
+  };
+
+  const handleCreate = async () => {
+    if (!newName.trim()) return;
+    setCreating(true);
+    const created = await presetsApi.create({
+      name: newName.trim(), genre: "Custom", bpm: 120, color: "cyan",
+      channels: Array(8).fill(0),
+    });
+    setPresets(prev => [...prev, created]);
+    setActivePreset(created.id);
+    setNewName("");
+    setCreating(false);
+  };
+
+  const filteredPresets = presets.filter(p =>
     p.name.toLowerCase().includes(search.toLowerCase()) ||
     p.genre.toLowerCase().includes(search.toLowerCase())
   );
@@ -644,18 +710,26 @@ function LibraryPanel() {
       {tab === "presets" && (
         <>
           <div className="flex-1 overflow-y-auto space-y-2">
-            {filteredPresets.map(preset => {
+            {loading && <div className="text-center py-8"><span className="font-mono-tech text-[10px] text-zinc-600 animate-pulse">ЗАГРУЗКА...</span></div>}
+            {!loading && filteredPresets.map(preset => {
               const col = GENRE_COLORS[preset.genre] || "#06b6d4";
               const isActive = activePreset === preset.id;
               return (
-                <div key={preset.id} onClick={() => setActivePreset(preset.id)}
+                <div key={preset.id} onClick={() => setActivePreset(isActive ? null : preset.id)}
                   className="p-3 border rounded cursor-pointer transition-all"
                   style={{ borderColor: isActive ? `${col}44` : "#27272a", background: isActive ? `${col}08` : "transparent" }}
                 >
                   <div className="flex items-center justify-between mb-2">
                     <span className="font-display text-sm font-semibold" style={{ color: col }}>{preset.name}</span>
-                    <span className="text-[10px] font-display tracking-widest px-1.5 py-0.5 rounded border"
-                      style={{ color: `${col}bb`, borderColor: `${col}33` }}>{preset.genre}</span>
+                    <div className="flex items-center gap-2">
+                      <span className="text-[10px] font-display tracking-widest px-1.5 py-0.5 rounded border"
+                        style={{ color: `${col}bb`, borderColor: `${col}33` }}>{preset.genre}</span>
+                      <button onClick={e => handleDelete(preset.id, e)}
+                        className="text-zinc-700 hover:text-red-400 transition-colors"
+                        style={{ opacity: deleting === preset.id ? 0.4 : 1 }}>
+                        <Icon name="X" size={12} />
+                      </button>
+                    </div>
                   </div>
                   <div className="flex items-center gap-4">
                     <span className="font-mono-tech text-xs text-zinc-500">{preset.bpm} BPM</span>
@@ -668,19 +742,33 @@ function LibraryPanel() {
                     </div>
                   </div>
                   {isActive && (
-                    <div className="mt-2 flex gap-2">
-                      <button className="flex-1 py-1.5 text-[10px] font-display tracking-widest border rounded"
-                        style={{ borderColor: `${col}50`, color: col, background: `${col}12` }}>ЗАГРУЗИТЬ</button>
-                      <button className="px-3 py-1.5 text-[10px] font-display tracking-widest border border-zinc-800 text-zinc-500 rounded">ИЗМЕНИТЬ</button>
+                    <div className="mt-2">
+                      <button className="w-full py-1.5 text-[10px] font-display tracking-widest border rounded"
+                        style={{ borderColor: `${col}50`, color: col, background: `${col}12` }}>
+                        ЗАГРУЗИТЬ В DMX
+                      </button>
                     </div>
                   )}
                 </div>
               );
             })}
           </div>
-          <button className="mt-3 w-full py-2 border border-dashed border-amber-500/25 text-amber-500/50 hover:border-amber-500/50 hover:text-amber-400 text-[10px] font-display tracking-widest rounded transition-all">
-            + НОВЫЙ ПРЕСЕТ
-          </button>
+          <div className="mt-3 flex gap-2">
+            <input value={newName} onChange={e => setNewName(e.target.value)}
+              onKeyDown={e => e.key === "Enter" && handleCreate()}
+              placeholder="Имя нового пресета..."
+              className="flex-1 px-3 py-1.5 bg-zinc-900 border border-zinc-800 rounded text-sm font-body text-zinc-100 placeholder:text-zinc-600 focus:outline-none focus:border-amber-500/40"
+            />
+            <button onClick={handleCreate} disabled={creating || !newName.trim()}
+              className="px-3 py-1.5 text-[10px] font-display tracking-widest border rounded transition-all"
+              style={{
+                borderColor: newName.trim() ? "rgba(245,158,11,0.5)" : "#27272a",
+                color: newName.trim() ? "#f59e0b" : "#52525b",
+                background: newName.trim() ? "rgba(245,158,11,0.08)" : "transparent",
+              }}>
+              {creating ? "..." : "+ СОЗДАТЬ"}
+            </button>
+          </div>
         </>
       )}
 
@@ -730,7 +818,52 @@ function SettingsPanel() {
   const [beatSync, setBeatSync] = useState(true);
   const [autoPreset, setAutoPreset] = useState(true);
   const [smoothing, setSmoothing] = useState(40);
-  const [connected, setConnected] = useState(true);
+  const [connected, setConnected] = useState(false);
+  const [pinging, setPinging] = useState(false);
+  const [pingResult, setPingResult] = useState<string | null>(null);
+  const [saving, setSaving] = useState(false);
+  const [savedAt, setSavedAt] = useState<string | null>(null);
+  const saveTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  useEffect(() => {
+    settingsApi.get().then((cfg: ApiSettings) => {
+      if (cfg.artnet_ip)       setIp(cfg.artnet_ip);
+      if (cfg.artnet_port)     setPort(cfg.artnet_port);
+      if (cfg.artnet_universe) setUniverse(cfg.artnet_universe);
+      if (cfg.ai_sensitivity)  setAiSensitivity(Number(cfg.ai_sensitivity));
+      if (cfg.ai_smoothing)    setSmoothing(Number(cfg.ai_smoothing));
+      if (cfg.beat_sync)       setBeatSync(cfg.beat_sync === "true");
+      if (cfg.auto_preset)     setAutoPreset(cfg.auto_preset === "true");
+    }).catch(() => {});
+  }, []);
+
+  const scheduleSave = useCallback(() => {
+    if (saveTimer.current) clearTimeout(saveTimer.current);
+    saveTimer.current = setTimeout(async () => {
+      setSaving(true);
+      await settingsApi.save({
+        artnet_ip: ip, artnet_port: port, artnet_universe: universe,
+        ai_sensitivity: String(aiSensitivity), ai_smoothing: String(smoothing),
+        beat_sync: String(beatSync), auto_preset: String(autoPreset),
+      });
+      setSaving(false);
+      setSavedAt(new Date().toLocaleTimeString("ru-RU"));
+    }, 800);
+  }, [ip, port, universe, aiSensitivity, smoothing, beatSync, autoPreset]);
+
+  useEffect(() => { scheduleSave(); }, [scheduleSave]);
+
+  const handlePing = async () => {
+    setPinging(true);
+    setPingResult(null);
+    const res = await artnetApi.test(ip, Number(port), Number(universe));
+    setConnected(res.ok);
+    setPingResult(res.ok ? `OK → ${ip}:${port}` : `Ошибка: ${res.error}`);
+    if (res.ok) {
+      await historyApi.add("auto", `Art-Net PING OK → ${ip}:${port} universe ${universe}`);
+    }
+    setPinging(false);
+  };
 
   function Toggle({ value, onChange, accent }: { value: boolean; onChange: () => void; accent: string }) {
     return (
@@ -767,18 +900,20 @@ function SettingsPanel() {
             />
           </div>
         ))}
-        <div className="flex gap-2 mt-3">
-          <button onClick={() => setConnected(v => !v)}
+        {pingResult && (
+          <div className="mb-2 px-2 py-1 rounded text-[10px] font-mono-tech"
+            style={{ background: connected ? "rgba(34,197,94,0.08)" : "rgba(239,68,68,0.08)",
+                     color: connected ? "#22c55e" : "#ef4444", border: `1px solid ${connected ? "#22c55e" : "#ef4444"}22` }}>
+            {pingResult}
+          </div>
+        )}
+        <div className="flex gap-2 mt-2">
+          <button onClick={handlePing} disabled={pinging}
             className="flex-1 py-1.5 text-[10px] font-display tracking-widest border rounded transition-all"
-            style={{
-              borderColor: connected ? "rgba(34,197,94,0.5)" : "rgba(6,182,212,0.5)",
-              color: connected ? "#22c55e" : "#06b6d4",
-              background: connected ? "rgba(34,197,94,0.08)" : "rgba(6,182,212,0.08)",
-            }}
+            style={{ borderColor: "rgba(6,182,212,0.5)", color: "#06b6d4", background: "rgba(6,182,212,0.08)" }}
           >
-            {connected ? "DISCONNECT" : "CONNECT"}
+            {pinging ? "PING..." : "PING / TEST"}
           </button>
-          <button className="px-3 py-1.5 text-[10px] font-display tracking-widest border border-zinc-800 text-zinc-500 rounded">PING</button>
         </div>
       </div>
 
@@ -813,21 +948,12 @@ function SettingsPanel() {
         </div>
       </div>
 
-      <div className="bg-zinc-900 border border-zinc-800 rounded p-3">
-        <span className="font-display text-xs tracking-widest text-amber-400 block mb-3">КАЛИБРОВКА</span>
-        <div className="grid grid-cols-2 gap-2">
-          {["DMX Test", "Latency Test", "Reset AI", "Factory Reset"].map(label => (
-            <button key={label}
-              className="py-2 text-[10px] font-display tracking-widest border rounded transition-all"
-              style={{
-                borderColor: label === "Factory Reset" ? "rgba(239,68,68,0.35)" : "#27272a",
-                color: label === "Factory Reset" ? "#ef4444" : "#71717a",
-              }}
-            >
-              {label}
-            </button>
-          ))}
-        </div>
+      {/* Save status */}
+      <div className="px-3 py-2 bg-zinc-900 border border-zinc-800 rounded flex items-center justify-between">
+        <span className="font-display text-[9px] tracking-widest text-zinc-600">АВТОСОХРАНЕНИЕ В БД</span>
+        <span className="font-mono-tech text-[10px]" style={{ color: saving ? "#f59e0b" : "#22c55e" }}>
+          {saving ? "СОХРАНЕНИЕ..." : savedAt ? `OK ${savedAt}` : "—"}
+        </span>
       </div>
     </div>
   );
@@ -836,39 +962,80 @@ function SettingsPanel() {
 // ─── History Panel ────────────────────────────────────────────────────────────
 function HistoryPanel() {
   const typeConfig: Record<string, { label: string; color: string; icon: string }> = {
-    ai: { label: "AI", color: "#a855f7", icon: "Cpu" },
-    auto: { label: "AUTO", color: "#06b6d4", icon: "Zap" },
+    ai:     { label: "AI",   color: "#a855f7", icon: "Cpu"  },
+    auto:   { label: "AUTO", color: "#06b6d4", icon: "Zap"  },
     manual: { label: "USER", color: "#f59e0b", icon: "User" },
+  };
+
+  const [events, setEvents] = useState<ApiEvent[]>([]);
+  const [total, setTotal] = useState(0);
+  const [loading, setLoading] = useState(true);
+  const [typeFilter, setTypeFilter] = useState<string>("all");
+  const [clearing, setClearing] = useState(false);
+
+  const load = useCallback(async () => {
+    setLoading(true);
+    const params = typeFilter !== "all" ? { type: typeFilter, limit: 100 } : { limit: 100 };
+    const res = await historyApi.list(params);
+    setEvents(res.events);
+    setTotal(res.total);
+    setLoading(false);
+  }, [typeFilter]);
+
+  useEffect(() => { load(); }, [load]);
+
+  const handleClear = async () => {
+    setClearing(true);
+    await historyApi.clear();
+    setEvents([]);
+    setTotal(0);
+    setClearing(false);
+  };
+
+  const formatTime = (iso: string) => {
+    try { return new Date(iso).toLocaleTimeString("ru-RU"); } catch { return iso; }
   };
 
   return (
     <div className="h-full flex flex-col">
       <PanelHeader title="Event Log" icon="Clock" accent="#3b82f6" />
 
-      <div className="flex gap-2 mb-3">
-        {(["ai", "auto", "manual"] as const).map(type => {
-          const c = typeConfig[type];
-          return (
-            <div key={type} className="flex items-center gap-1.5 px-2 py-1 border rounded"
-              style={{ borderColor: `${c.color}33` }}>
-              <Icon name={c.icon as Parameters<typeof Icon>[0]["name"]} size={10} style={{ color: c.color }} />
-              <span className="font-display text-[9px] tracking-widest" style={{ color: c.color }}>{c.label}</span>
-            </div>
-          );
-        })}
+      <div className="flex gap-2 mb-3 flex-wrap">
+        {([["all", "ВСЕ", "#52525b"], ["ai", "AI", "#a855f7"], ["auto", "AUTO", "#06b6d4"], ["manual", "USER", "#f59e0b"]] as const).map(([id, label, col]) => (
+          <button key={id} onClick={() => setTypeFilter(id)}
+            className="flex items-center gap-1.5 px-2 py-1 border rounded transition-all"
+            style={{
+              borderColor: typeFilter === id ? `${col}55` : `${col}22`,
+              background: typeFilter === id ? `${col}12` : "transparent",
+              color: typeFilter === id ? col : `${col}88`,
+            }}>
+            <span className="font-display text-[9px] tracking-widest">{label}</span>
+          </button>
+        ))}
         <div className="flex-1" />
-        <button className="px-2 py-1 text-[10px] font-display tracking-widest border border-zinc-800 text-zinc-500 hover:border-red-500/30 hover:text-red-400 rounded transition-all">
-          ОЧИСТИТЬ
+        <button onClick={handleClear} disabled={clearing}
+          className="px-2 py-1 text-[10px] font-display tracking-widest border border-zinc-800 text-zinc-500 hover:border-red-500/30 hover:text-red-400 rounded transition-all">
+          {clearing ? "..." : "ОЧИСТИТЬ"}
+        </button>
+        <button onClick={load}
+          className="px-2 py-1 text-[10px] font-display tracking-widest border border-zinc-800 text-zinc-500 hover:border-cyan-500/30 hover:text-cyan-400 rounded transition-all">
+          <Icon name="RefreshCw" size={11} />
         </button>
       </div>
 
       <div className="flex-1 overflow-y-auto space-y-2">
-        {HISTORY.map((event, i) => {
-          const c = typeConfig[event.type];
+        {loading && <div className="text-center py-8"><span className="font-mono-tech text-[10px] text-zinc-600 animate-pulse">ЗАГРУЗКА...</span></div>}
+        {!loading && events.length === 0 && (
+          <div className="text-center py-8">
+            <span className="font-mono-tech text-[10px] text-zinc-700">ИСТОРИЯ ПУСТА</span>
+          </div>
+        )}
+        {!loading && events.map((event, i) => {
+          const c = typeConfig[event.event_type] || typeConfig.manual;
           return (
             <div key={event.id}
               className="flex gap-3 p-2.5 border border-zinc-800 rounded hover:bg-zinc-900/50 transition-all"
-              style={{ animationDelay: `${i * 0.04}s` }}
+              style={{ animationDelay: `${i * 0.03}s` }}
             >
               <div className="shrink-0 pt-0.5">
                 <Icon name={c.icon as Parameters<typeof Icon>[0]["name"]} size={13} style={{ color: c.color }} />
@@ -876,7 +1043,7 @@ function HistoryPanel() {
               <div className="flex-1 min-w-0">
                 <div className="flex items-center gap-2 mb-0.5">
                   <span className="font-display text-[9px] tracking-widest" style={{ color: c.color }}>{c.label}</span>
-                  <span className="font-mono-tech text-[10px] text-zinc-600">{event.time}</span>
+                  <span className="font-mono-tech text-[10px] text-zinc-600">{formatTime(event.created_at)}</span>
                 </div>
                 <p className="font-body text-xs text-zinc-300 leading-snug">{event.message}</p>
               </div>
@@ -886,7 +1053,7 @@ function HistoryPanel() {
       </div>
 
       <div className="mt-3 p-2 bg-zinc-900 border border-zinc-800 rounded text-center">
-        <span className="font-mono-tech text-[10px] text-zinc-600">{HISTORY.length} событий · сессия 01:23:45</span>
+        <span className="font-mono-tech text-[10px] text-zinc-600">{total} событий в базе</span>
       </div>
     </div>
   );

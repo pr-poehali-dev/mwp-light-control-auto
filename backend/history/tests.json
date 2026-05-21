@@ -1,0 +1,12 @@
+{
+  "tests": [
+    {
+      "name": "GET history",
+      "method": "GET",
+      "path": "/",
+      "expectedStatus": 200,
+      "expectedBody": {"events": [], "total": 0},
+      "bodyMatcher": "type"
+    }
+  ]
+}

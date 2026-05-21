@@ -1,0 +1,12 @@
+{
+  "tests": [
+    {
+      "name": "GET artnet status",
+      "method": "GET",
+      "path": "/",
+      "expectedStatus": 200,
+      "expectedBody": {"ok": false},
+      "bodyMatcher": "partial"
+    }
+  ]
+}
