@@ -1,5 +1,6 @@
-import { useState, useEffect, useRef } from "react";
+import { useState, useEffect, useCallback } from "react";
 import Icon from "@/components/ui/icon";
+import { useWebAudio } from "@/hooks/useWebAudio";
 
 // ─── Types ───────────────────────────────────────────────────────────────────
 type TabId = "dmx" | "audio" | "library" | "settings" | "history" | "scene3d";
@@ -37,6 +38,26 @@ interface Light3D {
   intensity: number;
 }
 
+// ─── Fixture Library Types ────────────────────────────────────────────────────
+interface DmxAttribute {
+  name: string;
+  channel: number;
+  defaultVal: number;
+  min: number;
+  max: number;
+}
+
+interface FixtureProfile {
+  id: number;
+  manufacturer: string;
+  model: string;
+  type: "LED Par" | "Moving Head" | "Strobe" | "Wash" | "Spot" | "Laser";
+  channels: number;
+  dmxProfile: DmxAttribute[];
+  power: number;
+  description: string;
+}
+
 // ─── Data ─────────────────────────────────────────────────────────────────────
 const INITIAL_CHANNELS: DmxChannel[] = Array.from({ length: 16 }, (_, i) => ({
   id: i + 1,
@@ -52,6 +73,128 @@ const PRESETS: Preset[] = [
   { id: 4, name: "Ambient Flow", genre: "Ambient", bpm: 60, color: "purple", channels: [80, 0, 180, 120, 40, 200, 0, 60] },
   { id: 5, name: "Pop Shine", genre: "Pop", bpm: 110, color: "green", channels: [200, 180, 100, 60, 180, 120, 80, 160] },
   { id: 6, name: "Deep House", genre: "House", bpm: 128, color: "blue", channels: [120, 0, 255, 80, 100, 200, 0, 180] },
+];
+
+const FIXTURE_LIBRARY: FixtureProfile[] = [
+  {
+    id: 1, manufacturer: "Chauvet", model: "SlimPAR Pro H USB", type: "LED Par",
+    channels: 8, power: 60, description: "LED PAR с RGBAW+UV, 8 каналов DMX",
+    dmxProfile: [
+      { name: "Димер", channel: 1, defaultVal: 255, min: 0, max: 255 },
+      { name: "Красный", channel: 2, defaultVal: 0, min: 0, max: 255 },
+      { name: "Зелёный", channel: 3, defaultVal: 0, min: 0, max: 255 },
+      { name: "Синий", channel: 4, defaultVal: 255, min: 0, max: 255 },
+      { name: "Белый", channel: 5, defaultVal: 0, min: 0, max: 255 },
+      { name: "Янтарный", channel: 6, defaultVal: 0, min: 0, max: 255 },
+      { name: "UV", channel: 7, defaultVal: 0, min: 0, max: 255 },
+      { name: "Strobo", channel: 8, defaultVal: 0, min: 0, max: 255 },
+    ],
+  },
+  {
+    id: 2, manufacturer: "Robe", model: "ROBIN 100 LEDBeam", type: "Moving Head",
+    channels: 14, power: 90, description: "Движущаяся голова с зумом 4-60°",
+    dmxProfile: [
+      { name: "Pan", channel: 1, defaultVal: 128, min: 0, max: 255 },
+      { name: "Pan Fine", channel: 2, defaultVal: 0, min: 0, max: 255 },
+      { name: "Tilt", channel: 3, defaultVal: 128, min: 0, max: 255 },
+      { name: "Tilt Fine", channel: 4, defaultVal: 0, min: 0, max: 255 },
+      { name: "Скорость PT", channel: 5, defaultVal: 0, min: 0, max: 255 },
+      { name: "Димер", channel: 6, defaultVal: 255, min: 0, max: 255 },
+      { name: "Strobo", channel: 7, defaultVal: 0, min: 0, max: 255 },
+      { name: "Красный", channel: 8, defaultVal: 0, min: 0, max: 255 },
+      { name: "Зелёный", channel: 9, defaultVal: 0, min: 0, max: 255 },
+      { name: "Синий", channel: 10, defaultVal: 255, min: 0, max: 255 },
+      { name: "Белый", channel: 11, defaultVal: 0, min: 0, max: 255 },
+      { name: "Зум", channel: 12, defaultVal: 128, min: 0, max: 255 },
+      { name: "Фокус", channel: 13, defaultVal: 128, min: 0, max: 255 },
+      { name: "Сброс", channel: 14, defaultVal: 0, min: 0, max: 255 },
+    ],
+  },
+  {
+    id: 3, manufacturer: "Martin", model: "Atomic 3000 LED", type: "Strobe",
+    channels: 5, power: 640, description: "Профессиональный LED-строб",
+    dmxProfile: [
+      { name: "Интенсивность", channel: 1, defaultVal: 255, min: 0, max: 255 },
+      { name: "Частота", channel: 2, defaultVal: 0, min: 0, max: 255 },
+      { name: "Режим", channel: 3, defaultVal: 0, min: 0, max: 255 },
+      { name: "Случайность", channel: 4, defaultVal: 0, min: 0, max: 255 },
+      { name: "Цвет", channel: 5, defaultVal: 0, min: 0, max: 255 },
+    ],
+  },
+  {
+    id: 4, manufacturer: "ETC", model: "Source Four LED Lustr+", type: "Spot",
+    channels: 6, power: 100, description: "Профиль с системой смешивания X8 цветов",
+    dmxProfile: [
+      { name: "Интенсивность", channel: 1, defaultVal: 255, min: 0, max: 255 },
+      { name: "Красный", channel: 2, defaultVal: 255, min: 0, max: 255 },
+      { name: "Зелёный", channel: 3, defaultVal: 200, min: 0, max: 255 },
+      { name: "Синий", channel: 4, defaultVal: 100, min: 0, max: 255 },
+      { name: "Индиго", channel: 5, defaultVal: 0, min: 0, max: 255 },
+      { name: "Цикл", channel: 6, defaultVal: 0, min: 0, max: 255 },
+    ],
+  },
+  {
+    id: 5, manufacturer: "Clay Paky", model: "Sharpy", type: "Moving Head",
+    channels: 16, power: 189, description: "Beam-прибор с призмами и гобо",
+    dmxProfile: [
+      { name: "Pan", channel: 1, defaultVal: 128, min: 0, max: 255 },
+      { name: "Pan Fine", channel: 2, defaultVal: 0, min: 0, max: 255 },
+      { name: "Tilt", channel: 3, defaultVal: 128, min: 0, max: 255 },
+      { name: "Tilt Fine", channel: 4, defaultVal: 0, min: 0, max: 255 },
+      { name: "Скорость", channel: 5, defaultVal: 0, min: 0, max: 255 },
+      { name: "Цвет", channel: 6, defaultVal: 0, min: 0, max: 255 },
+      { name: "Гобо", channel: 7, defaultVal: 0, min: 0, max: 255 },
+      { name: "Вращение гобо", channel: 8, defaultVal: 0, min: 0, max: 255 },
+      { name: "Призма", channel: 9, defaultVal: 0, min: 0, max: 255 },
+      { name: "Вращение призмы", channel: 10, defaultVal: 0, min: 0, max: 255 },
+      { name: "Фокус", channel: 11, defaultVal: 128, min: 0, max: 255 },
+      { name: "Строб/Шаттер", channel: 12, defaultVal: 255, min: 0, max: 255 },
+      { name: "Димер", channel: 13, defaultVal: 255, min: 0, max: 255 },
+      { name: "Зум", channel: 14, defaultVal: 0, min: 0, max: 255 },
+      { name: "Эффекты", channel: 15, defaultVal: 0, min: 0, max: 255 },
+      { name: "Сброс", channel: 16, defaultVal: 0, min: 0, max: 255 },
+    ],
+  },
+  {
+    id: 6, manufacturer: "Cameo", model: "HYDRABEAM 400 RGBW", type: "Moving Head",
+    channels: 9, power: 80, description: "Компактная движущаяся голова RGBW для клубов",
+    dmxProfile: [
+      { name: "Pan", channel: 1, defaultVal: 128, min: 0, max: 255 },
+      { name: "Tilt", channel: 2, defaultVal: 128, min: 0, max: 255 },
+      { name: "Скорость", channel: 3, defaultVal: 0, min: 0, max: 255 },
+      { name: "Красный", channel: 4, defaultVal: 0, min: 0, max: 255 },
+      { name: "Зелёный", channel: 5, defaultVal: 0, min: 0, max: 255 },
+      { name: "Синий", channel: 6, defaultVal: 255, min: 0, max: 255 },
+      { name: "Белый", channel: 7, defaultVal: 0, min: 0, max: 255 },
+      { name: "Строб", channel: 8, defaultVal: 0, min: 0, max: 255 },
+      { name: "Режим", channel: 9, defaultVal: 0, min: 0, max: 255 },
+    ],
+  },
+  {
+    id: 7, manufacturer: "Eurolite", model: "LED TMH-X4", type: "Wash",
+    channels: 7, power: 40, description: "Wash прибор 4-в-1 RGBW 10W",
+    dmxProfile: [
+      { name: "Красный", channel: 1, defaultVal: 0, min: 0, max: 255 },
+      { name: "Зелёный", channel: 2, defaultVal: 0, min: 0, max: 255 },
+      { name: "Синий", channel: 3, defaultVal: 255, min: 0, max: 255 },
+      { name: "Белый", channel: 4, defaultVal: 0, min: 0, max: 255 },
+      { name: "Димер", channel: 5, defaultVal: 255, min: 0, max: 255 },
+      { name: "Строб", channel: 6, defaultVal: 0, min: 0, max: 255 },
+      { name: "Режим", channel: 7, defaultVal: 0, min: 0, max: 255 },
+    ],
+  },
+  {
+    id: 8, manufacturer: "Laserworld", model: "EL-200RGB", type: "Laser",
+    channels: 6, power: 35, description: "RGB лазер 200мВт для клубов",
+    dmxProfile: [
+      { name: "Включение", channel: 1, defaultVal: 255, min: 0, max: 255 },
+      { name: "Паттерн", channel: 2, defaultVal: 0, min: 0, max: 255 },
+      { name: "Размер", channel: 3, defaultVal: 128, min: 0, max: 255 },
+      { name: "Вращение", channel: 4, defaultVal: 0, min: 0, max: 255 },
+      { name: "Скорость", channel: 5, defaultVal: 128, min: 0, max: 255 },
+      { name: "Цвет", channel: 6, defaultVal: 0, min: 0, max: 255 },
+    ],
+  },
 ];
 
 const HISTORY: HistoryEvent[] = [
@@ -192,29 +335,10 @@ function DmxPanel() {
 
 // ─── Audio Panel ──────────────────────────────────────────────────────────────
 function AudioPanel() {
-  const [bars, setBars] = useState<number[]>(Array.from({ length: 32 }, () => Math.random() * 0.5 + 0.1));
-  const [genre, setGenre] = useState("Techno");
-  const [bpm, setBpm] = useState(138);
-  const [energy, setEnergy] = useState(0.82);
-  const [aiActive, setAiActive] = useState(true);
-  const animRef = useRef<number>(0);
-
-  useEffect(() => {
-    const tick = () => {
-      setBars(prev => prev.map(v => {
-        const target = Math.random() * 0.9 + 0.05;
-        return v + (target - v) * 0.12;
-      }));
-      if (Math.random() > 0.95) setBpm(prev => prev + (Math.random() > 0.5 ? 1 : -1));
-      setEnergy(prev => Math.max(0.1, Math.min(1, prev + (Math.random() - 0.5) * 0.04)));
-      animRef.current = requestAnimationFrame(tick);
-    };
-    if (aiActive) { animRef.current = requestAnimationFrame(tick); }
-    return () => cancelAnimationFrame(animRef.current);
-  }, [aiActive]);
+  const { analysis, start, stop } = useWebAudio();
+  const { bars, bpm, energy, genre, isListening, error } = analysis;
 
   const barColors = ["#3b82f6", "#06b6d4", "#22c55e", "#f59e0b", "#ef4444", "#a855f7"];
-  const genres = ["Techno", "House", "Jazz", "Rock", "Pop", "Ambient", "DnB"];
 
   const energyGradient = energy > 0.7
     ? "linear-gradient(90deg, #f59e0b, #ef4444)"
@@ -222,51 +346,89 @@ function AudioPanel() {
     ? "linear-gradient(90deg, #22c55e, #f59e0b)"
     : "linear-gradient(90deg, #3b82f6, #22c55e)";
 
-  const energyLabel = energy > 0.7 ? "#ef4444" : energy > 0.4 ? "#f59e0b" : "#22c55e";
+  const energyColor = energy > 0.7 ? "#ef4444" : energy > 0.4 ? "#f59e0b" : "#22c55e";
+
+  const energyLabel =
+    energy > 0.75 ? "CRITICAL" :
+    energy > 0.55 ? "HIGH" :
+    energy > 0.35 ? "MED" : "LOW";
 
   return (
     <div className="h-full flex flex-col">
       <PanelHeader title="Audio Analysis" icon="Activity" accent="#a855f7" />
 
-      <div className="flex items-center gap-3 mb-4 p-3 bg-zinc-900 border border-zinc-800 rounded" style={{ borderColor: "rgba(168,85,247,0.3)" }}>
-        <div className={`w-2 h-2 rounded-full shrink-0 ${aiActive ? "bg-green-400 animate-pulse" : "bg-zinc-600"}`} />
-        <span className="font-display text-[10px] tracking-widest text-zinc-500">AI ENGINE</span>
-        <button onClick={() => setAiActive(v => !v)}
+      {/* Control bar */}
+      <div className="flex items-center gap-3 mb-4 p-3 bg-zinc-900 border rounded"
+        style={{ borderColor: isListening ? "rgba(168,85,247,0.4)" : "rgba(63,63,70,0.8)" }}>
+        <div className={`w-2 h-2 rounded-full shrink-0 ${isListening ? "bg-green-400 animate-pulse" : "bg-zinc-600"}`} />
+        <span className="font-display text-[10px] tracking-widest text-zinc-500">
+          {isListening ? "ЗАХВАТ АУДИО" : "МИК ОТКЛЮЧЁН"}
+        </span>
+        <button
+          onClick={isListening ? stop : start}
           className="px-3 py-1 text-[10px] font-display tracking-widest border rounded transition-all"
           style={{
-            borderColor: aiActive ? "rgba(34,197,94,0.5)" : "#3f3f46",
-            color: aiActive ? "#22c55e" : "#71717a",
-            background: aiActive ? "rgba(34,197,94,0.08)" : "transparent",
+            borderColor: isListening ? "rgba(239,68,68,0.5)" : "rgba(34,197,94,0.5)",
+            color: isListening ? "#ef4444" : "#22c55e",
+            background: isListening ? "rgba(239,68,68,0.08)" : "rgba(34,197,94,0.08)",
           }}
         >
-          {aiActive ? "ACTIVE" : "INACTIVE"}
+          {isListening ? "■ СТОП" : "▶ СЛУШАТЬ"}
         </button>
         <div className="flex-1" />
-        <span className="font-mono-tech text-sm" style={{ color: "#a855f7" }}>{bpm}</span>
-        <span className="font-mono-tech text-[10px] text-zinc-500">BPM</span>
+        {bpm > 0 ? (
+          <>
+            <span className="font-mono-tech text-sm" style={{ color: "#a855f7" }}>{bpm}</span>
+            <span className="font-mono-tech text-[10px] text-zinc-500">BPM</span>
+          </>
+        ) : (
+          <span className="font-mono-tech text-[10px] text-zinc-600">— BPM</span>
+        )}
       </div>
 
-      {/* Spectrum */}
-      <div className="flex items-end gap-0.5 px-1 bg-black/50 rounded border border-zinc-800 mb-4"
+      {/* Error */}
+      {error && (
+        <div className="mb-3 px-3 py-2 bg-red-950/40 border border-red-500/30 rounded">
+          <span className="font-mono-tech text-[10px] text-red-400">⚠ {error}</span>
+        </div>
+      )}
+
+      {/* Spectrum visualizer */}
+      <div className="relative flex items-end gap-0.5 px-1 bg-black/60 rounded border border-zinc-800 mb-4 overflow-hidden"
         style={{ height: 130 }}>
-        {bars.map((v, i) => (
-          <div key={i} className="flex-1 rounded-t-sm"
-            style={{
-              height: `${v * 100}%`,
-              background: barColors[Math.floor(i / (bars.length / barColors.length))],
-              opacity: 0.65 + v * 0.35,
-              transition: "height 0.06s ease-out",
-              boxShadow: `0 -3px 8px ${barColors[Math.floor(i / (bars.length / barColors.length))]}55`,
-            }}
-          />
-        ))}
+        {/* Reflection */}
+        <div className="absolute bottom-0 left-0 right-0 h-8 pointer-events-none"
+          style={{ background: "linear-gradient(to top, rgba(0,0,0,0.6), transparent)" }} />
+        {bars.map((v, i) => {
+          const colIdx = Math.floor(i / (bars.length / barColors.length));
+          const col = barColors[colIdx];
+          return (
+            <div key={i} className="flex-1 flex flex-col-reverse">
+              <div className="rounded-t-sm"
+                style={{
+                  height: `${Math.max(v * 100, 2)}%`,
+                  background: col,
+                  opacity: isListening ? 0.6 + v * 0.4 : 0.15,
+                  transition: "height 0.05s ease-out, opacity 0.3s",
+                  boxShadow: isListening && v > 0.5 ? `0 -4px 10px ${col}66` : "none",
+                }}
+              />
+            </div>
+          );
+        })}
+        {!isListening && (
+          <div className="absolute inset-0 flex items-center justify-center">
+            <span className="font-display text-[10px] tracking-widest text-zinc-600">НАЖМИТЕ СЛУШАТЬ</span>
+          </div>
+        )}
       </div>
 
+      {/* AI Stats */}
       <div className="grid grid-cols-3 gap-2 mb-3">
         {[
           { label: "ЖАНР", value: genre, color: "#06b6d4" },
-          { label: "ТЕМП", value: `${bpm} BPM`, color: "#f59e0b" },
-          { label: "ЭНЕРГИЯ", value: `${Math.round(energy * 100)}%`, color: energyLabel },
+          { label: "ТЕМП", value: bpm > 0 ? `${bpm} BPM` : "—", color: "#f59e0b" },
+          { label: "ЭНЕРГИЯ", value: energyLabel, color: energyColor },
         ].map(({ label, value, color }) => (
           <div key={label} className="bg-zinc-900 border border-zinc-800 p-2 rounded text-center">
             <div className="font-display text-[9px] tracking-widest text-zinc-500 mb-1">{label}</div>
@@ -275,108 +437,286 @@ function AudioPanel() {
         ))}
       </div>
 
+      {/* Energy bar */}
       <div className="mb-3">
         <div className="flex justify-between mb-1">
           <span className="font-display text-[9px] tracking-widest text-zinc-500">УРОВЕНЬ ЭНЕРГИИ</span>
-          <span className="font-mono-tech text-[10px] text-zinc-500">{Math.round(energy * 100)}%</span>
+          <span className="font-mono-tech text-[10px]" style={{ color: energyColor }}>{Math.round(energy * 100)}%</span>
         </div>
         <div className="h-2 bg-zinc-800 rounded-full overflow-hidden">
-          <div className="h-full rounded-full transition-all duration-200"
-            style={{ width: `${energy * 100}%`, background: energyGradient, boxShadow: `0 0 8px ${energyLabel}88` }}
+          <div className="h-full rounded-full transition-all duration-150"
+            style={{
+              width: `${energy * 100}%`,
+              background: energyGradient,
+              boxShadow: isListening ? `0 0 8px ${energyColor}88` : "none",
+            }}
           />
         </div>
       </div>
 
-      <div className="flex flex-wrap gap-1.5">
-        {genres.map(g => (
-          <button key={g} onClick={() => setGenre(g)}
-            className="px-2 py-0.5 text-[10px] font-display tracking-widest border rounded transition-all"
-            style={{
-              borderColor: genre === g ? "rgba(168,85,247,0.6)" : "#3f3f46",
-              color: genre === g ? "#a855f7" : "#71717a",
-              background: genre === g ? "rgba(168,85,247,0.1)" : "transparent",
-            }}
-          >
-            {g}
-          </button>
-        ))}
+      {/* Frequency bands */}
+      <div className="grid grid-cols-3 gap-2">
+        {[
+          { label: "BASS", range: [0, 10], color: "#3b82f6" },
+          { label: "MID", range: [10, 22], color: "#22c55e" },
+          { label: "HIGH", range: [22, 32], color: "#a855f7" },
+        ].map(({ label, range, color }) => {
+          const avg = bars.slice(range[0], range[1]).reduce((a, b) => a + b, 0) / (range[1] - range[0]);
+          return (
+            <div key={label} className="bg-zinc-900 border border-zinc-800 p-2 rounded">
+              <div className="flex justify-between mb-1">
+                <span className="font-display text-[9px] tracking-widest text-zinc-600">{label}</span>
+                <span className="font-mono-tech text-[9px]" style={{ color }}>{Math.round(avg * 100)}%</span>
+              </div>
+              <div className="h-1 bg-zinc-800 rounded-full overflow-hidden">
+                <div className="h-full rounded-full transition-all duration-100"
+                  style={{ width: `${avg * 100}%`, background: color, boxShadow: `0 0 4px ${color}88` }} />
+              </div>
+            </div>
+          );
+        })}
       </div>
     </div>
   );
 }
 
 // ─── Library Panel ────────────────────────────────────────────────────────────
-function LibraryPanel() {
-  const [active, setActive] = useState<number | null>(1);
-  const [search, setSearch] = useState("");
+const TYPE_COLORS: Record<string, string> = {
+  "LED Par": "#06b6d4",
+  "Moving Head": "#a855f7",
+  "Strobe": "#ef4444",
+  "Wash": "#22c55e",
+  "Spot": "#f59e0b",
+  "Laser": "#3b82f6",
+};
 
-  const genreColors: Record<string, string> = {
-    Techno: "#06b6d4", Jazz: "#f59e0b", Rock: "#ef4444",
-    Ambient: "#a855f7", Pop: "#22c55e", House: "#3b82f6",
+const GENRE_COLORS: Record<string, string> = {
+  Techno: "#06b6d4", Jazz: "#f59e0b", Rock: "#ef4444",
+  Ambient: "#a855f7", Pop: "#22c55e", House: "#3b82f6",
+};
+
+function FixtureCard({ fixture, isSelected, onSelect }: {
+  fixture: FixtureProfile;
+  isSelected: boolean;
+  onSelect: () => void;
+}) {
+  const [channelValues, setChannelValues] = useState<number[]>(
+    fixture.dmxProfile.map(a => a.defaultVal)
+  );
+  const col = TYPE_COLORS[fixture.type] || "#06b6d4";
+
+  const updateChannel = (idx: number, val: number) => {
+    setChannelValues(prev => { const n = [...prev]; n[idx] = val; return n; });
   };
 
-  const filtered = PRESETS.filter(p =>
+  const exportDMX = useCallback(() => {
+    const lines = [
+      `# ${fixture.manufacturer} ${fixture.model}`,
+      `# Тип: ${fixture.type} | ${fixture.channels}ch | ${fixture.power}W`,
+      "",
+      ...fixture.dmxProfile.map((a, i) => `CH${String(a.channel).padStart(3, "0")} ${String(channelValues[i]).padStart(3, " ")}  ; ${a.name}`),
+    ];
+    const blob = new Blob([lines.join("\n")], { type: "text/plain" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = `${fixture.manufacturer}_${fixture.model.replace(/\s+/g, "_")}.dmx`;
+    a.click();
+    URL.revokeObjectURL(url);
+  }, [fixture, channelValues]);
+
+  return (
+    <div className="border rounded overflow-hidden transition-all cursor-pointer"
+      style={{ borderColor: isSelected ? `${col}55` : "#27272a", background: isSelected ? `${col}06` : "transparent" }}
+      onClick={onSelect}
+    >
+      {/* Header */}
+      <div className="flex items-center gap-3 px-3 py-2.5">
+        <div className="w-1.5 h-8 rounded-full shrink-0" style={{ background: `${col}66` }} />
+        <div className="flex-1 min-w-0">
+          <div className="flex items-center gap-2 mb-0.5">
+            <span className="font-display text-xs font-semibold" style={{ color: col }}>{fixture.model}</span>
+            <span className="font-display text-[9px] tracking-widest px-1.5 py-0.5 rounded border"
+              style={{ color: `${col}99`, borderColor: `${col}33` }}>{fixture.type}</span>
+          </div>
+          <div className="flex items-center gap-3">
+            <span className="font-mono-tech text-[10px] text-zinc-600">{fixture.manufacturer}</span>
+            <span className="font-mono-tech text-[10px] text-zinc-700">{fixture.channels}ch</span>
+            <span className="font-mono-tech text-[10px] text-zinc-700">{fixture.power}W</span>
+          </div>
+        </div>
+        <button
+          onClick={e => { e.stopPropagation(); exportDMX(); }}
+          className="px-2 py-1 text-[10px] font-display tracking-widest border border-zinc-800 text-zinc-500 hover:border-amber-500/40 hover:text-amber-400 rounded transition-all"
+          title="Скачать DMX профиль"
+        >
+          <Icon name="Download" size={11} />
+        </button>
+      </div>
+
+      {/* Expanded: DMX channel editor */}
+      {isSelected && (
+        <div className="px-3 pb-3 border-t border-zinc-800/60 pt-3 animate-fade-in"
+          onClick={e => e.stopPropagation()}>
+          <div className="text-[9px] font-display tracking-widest text-zinc-600 mb-2">DMX ПРОФИЛЬ — НАСТРОЙКА КАНАЛОВ</div>
+          <div className="space-y-2 max-h-52 overflow-y-auto pr-1">
+            {fixture.dmxProfile.map((attr, idx) => (
+              <div key={attr.channel} className="flex items-center gap-3">
+                <span className="font-mono-tech text-[9px] w-5 text-zinc-700">{attr.channel}</span>
+                <span className="font-display text-[10px] text-zinc-400 w-24 shrink-0 truncate">{attr.name}</span>
+                <input type="range" min={attr.min} max={attr.max} value={channelValues[idx]}
+                  onChange={e => updateChannel(idx, +e.target.value)}
+                  className="flex-1 h-1 appearance-none bg-zinc-800 rounded cursor-pointer"
+                  style={{ accentColor: col }}
+                />
+                <span className="font-mono-tech text-[10px] w-8 text-right" style={{ color: col }}>
+                  {channelValues[idx]}
+                </span>
+              </div>
+            ))}
+          </div>
+          <div className="mt-3 flex gap-2">
+            <button onClick={exportDMX}
+              className="flex-1 py-1.5 text-[10px] font-display tracking-widest border rounded flex items-center justify-center gap-1.5 transition-all hover:opacity-90"
+              style={{ borderColor: `${col}44`, color: col, background: `${col}10` }}>
+              <Icon name="Download" size={11} />
+              СКАЧАТЬ DMX ПРОФИЛЬ
+            </button>
+            <button
+              onClick={() => setChannelValues(fixture.dmxProfile.map(a => a.defaultVal))}
+              className="px-3 py-1.5 text-[10px] font-display tracking-widest border border-zinc-800 text-zinc-500 rounded hover:text-zinc-300 transition-all"
+            >
+              СБРОС
+            </button>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function LibraryPanel() {
+  const [tab, setTab] = useState<"presets" | "fixtures">("presets");
+  const [activePreset, setActivePreset] = useState<number | null>(1);
+  const [activeFixture, setActiveFixture] = useState<number | null>(null);
+  const [search, setSearch] = useState("");
+  const [typeFilter, setTypeFilter] = useState<string>("ALL");
+
+  const filteredPresets = PRESETS.filter(p =>
     p.name.toLowerCase().includes(search.toLowerCase()) ||
     p.genre.toLowerCase().includes(search.toLowerCase())
   );
+
+  const fixtureTypes = ["ALL", ...Array.from(new Set(FIXTURE_LIBRARY.map(f => f.type)))];
+  const filteredFixtures = FIXTURE_LIBRARY.filter(f => {
+    const matchSearch = f.model.toLowerCase().includes(search.toLowerCase()) ||
+      f.manufacturer.toLowerCase().includes(search.toLowerCase());
+    const matchType = typeFilter === "ALL" || f.type === typeFilter;
+    return matchSearch && matchType;
+  });
 
   return (
     <div className="h-full flex flex-col">
       <PanelHeader title="Library" icon="BookOpen" accent="#f59e0b" />
 
+      {/* Tab switcher */}
+      <div className="flex gap-1 mb-3 p-1 bg-zinc-900 border border-zinc-800 rounded">
+        {([["presets", "Пресеты"], ["fixtures", "Приборы"]] as const).map(([id, label]) => (
+          <button key={id} onClick={() => { setTab(id); setSearch(""); }}
+            className="flex-1 py-1.5 text-[10px] font-display tracking-widest rounded transition-all"
+            style={{
+              background: tab === id ? "#f59e0b1a" : "transparent",
+              color: tab === id ? "#f59e0b" : "#71717a",
+              border: tab === id ? "1px solid rgba(245,158,11,0.4)" : "1px solid transparent",
+            }}
+          >
+            {label}
+          </button>
+        ))}
+      </div>
+
       <input value={search} onChange={e => setSearch(e.target.value)}
-        placeholder="Поиск пресета..."
+        placeholder={tab === "presets" ? "Поиск пресета..." : "Поиск прибора..."}
         className="w-full mb-3 px-3 py-2 bg-zinc-900 border border-zinc-800 rounded text-sm font-body text-zinc-100 placeholder:text-zinc-600 focus:outline-none focus:border-amber-500/40"
       />
 
-      <div className="flex-1 overflow-y-auto space-y-2">
-        {filtered.map(preset => {
-          const col = genreColors[preset.genre] || "#06b6d4";
-          const isActive = active === preset.id;
-          return (
-            <div key={preset.id} onClick={() => setActive(preset.id)}
-              className="p-3 border rounded cursor-pointer transition-all"
-              style={{
-                borderColor: isActive ? `${col}44` : "#27272a",
-                background: isActive ? `${col}08` : "transparent",
-              }}
-            >
-              <div className="flex items-center justify-between mb-2">
-                <span className="font-display text-sm font-semibold" style={{ color: col }}>{preset.name}</span>
-                <span className="text-[10px] font-display tracking-widest px-1.5 py-0.5 rounded border"
-                  style={{ color: `${col}bb`, borderColor: `${col}33` }}>
-                  {preset.genre}
-                </span>
-              </div>
-              <div className="flex items-center gap-4">
-                <span className="font-mono-tech text-xs text-zinc-500">{preset.bpm} BPM</span>
-                <div className="flex gap-0.5 flex-1">
-                  {preset.channels.map((v, i) => (
-                    <div key={i} className="flex-1 rounded-sm"
-                      style={{ height: 12, background: `${col}${Math.floor((v / 255) * 0.8 * 255 + 30).toString(16).padStart(2, "0")}` }}
-                    />
-                  ))}
+      {/* Presets tab */}
+      {tab === "presets" && (
+        <>
+          <div className="flex-1 overflow-y-auto space-y-2">
+            {filteredPresets.map(preset => {
+              const col = GENRE_COLORS[preset.genre] || "#06b6d4";
+              const isActive = activePreset === preset.id;
+              return (
+                <div key={preset.id} onClick={() => setActivePreset(preset.id)}
+                  className="p-3 border rounded cursor-pointer transition-all"
+                  style={{ borderColor: isActive ? `${col}44` : "#27272a", background: isActive ? `${col}08` : "transparent" }}
+                >
+                  <div className="flex items-center justify-between mb-2">
+                    <span className="font-display text-sm font-semibold" style={{ color: col }}>{preset.name}</span>
+                    <span className="text-[10px] font-display tracking-widest px-1.5 py-0.5 rounded border"
+                      style={{ color: `${col}bb`, borderColor: `${col}33` }}>{preset.genre}</span>
+                  </div>
+                  <div className="flex items-center gap-4">
+                    <span className="font-mono-tech text-xs text-zinc-500">{preset.bpm} BPM</span>
+                    <div className="flex gap-0.5 flex-1">
+                      {preset.channels.map((v, i) => (
+                        <div key={i} className="flex-1 rounded-sm"
+                          style={{ height: 12, background: `${col}${Math.floor((v / 255) * 0.7 * 255 + 40).toString(16).padStart(2, "0")}` }}
+                        />
+                      ))}
+                    </div>
+                  </div>
+                  {isActive && (
+                    <div className="mt-2 flex gap-2">
+                      <button className="flex-1 py-1.5 text-[10px] font-display tracking-widest border rounded"
+                        style={{ borderColor: `${col}50`, color: col, background: `${col}12` }}>ЗАГРУЗИТЬ</button>
+                      <button className="px-3 py-1.5 text-[10px] font-display tracking-widest border border-zinc-800 text-zinc-500 rounded">ИЗМЕНИТЬ</button>
+                    </div>
+                  )}
                 </div>
-              </div>
-              {isActive && (
-                <div className="mt-2 flex gap-2">
-                  <button className="flex-1 py-1.5 text-[10px] font-display tracking-widest border rounded transition-all"
-                    style={{ borderColor: `${col}50`, color: col, background: `${col}12` }}>
-                    ЗАГРУЗИТЬ
-                  </button>
-                  <button className="px-3 py-1.5 text-[10px] font-display tracking-widest border border-zinc-800 text-zinc-500 rounded">
-                    ИЗМЕНИТЬ
-                  </button>
-                </div>
-              )}
-            </div>
-          );
-        })}
-      </div>
+              );
+            })}
+          </div>
+          <button className="mt-3 w-full py-2 border border-dashed border-amber-500/25 text-amber-500/50 hover:border-amber-500/50 hover:text-amber-400 text-[10px] font-display tracking-widest rounded transition-all">
+            + НОВЫЙ ПРЕСЕТ
+          </button>
+        </>
+      )}
 
-      <button className="mt-3 w-full py-2 border border-dashed border-amber-500/25 text-amber-500/50 hover:border-amber-500/50 hover:text-amber-400 text-[10px] font-display tracking-widest rounded transition-all">
-        + НОВЫЙ ПРЕСЕТ
-      </button>
+      {/* Fixtures tab */}
+      {tab === "fixtures" && (
+        <>
+          {/* Type filter */}
+          <div className="flex gap-1 mb-3 flex-wrap">
+            {fixtureTypes.map(type => (
+              <button key={type} onClick={() => setTypeFilter(type)}
+                className="px-2 py-0.5 text-[9px] font-display tracking-widest border rounded transition-all"
+                style={{
+                  borderColor: typeFilter === type ? `${TYPE_COLORS[type] || "#f59e0b"}55` : "#27272a",
+                  color: typeFilter === type ? (TYPE_COLORS[type] || "#f59e0b") : "#52525b",
+                  background: typeFilter === type ? `${TYPE_COLORS[type] || "#f59e0b"}10` : "transparent",
+                }}
+              >
+                {type}
+              </button>
+            ))}
+          </div>
+
+          <div className="flex-1 overflow-y-auto space-y-2">
+            {filteredFixtures.map(fixture => (
+              <FixtureCard key={fixture.id} fixture={fixture}
+                isSelected={activeFixture === fixture.id}
+                onSelect={() => setActiveFixture(activeFixture === fixture.id ? null : fixture.id)}
+              />
+            ))}
+          </div>
+
+          <div className="mt-2 px-2 py-1.5 bg-zinc-900/60 border border-zinc-800 rounded text-center">
+            <span className="font-mono-tech text-[9px] text-zinc-600">{FIXTURE_LIBRARY.length} приборов в базе · Нажмите для настройки DMX</span>
+          </div>
+        </>
+      )}
     </div>
   );
 }
