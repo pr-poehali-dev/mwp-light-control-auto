@@ -1,10 +1,25 @@
 import { useState, useEffect, useRef, useCallback } from "react";
 
+export type TrackStructure = "intro" | "buildup" | "drop" | "breakdown" | "outro" | "unknown";
+export type MoodType =
+  | "aggressive"   // высокая энергия, быстро, тяжёлый бас
+  | "euphoric"     // высокая энергия, яркие верха, быстро
+  | "dark"         // средняя энергия, низкий бас, мало верхов
+  | "melancholic"  // низкая энергия, преобладают средние частоты
+  | "tense"        // нарастающая энергия, bildup state
+  | "relaxed"      // низкая энергия, плавные изменения
+  | "hypnotic"     // монотонная повторяющаяся структура
+  | "energetic";   // общая высокая энергия
+
 export interface AudioAnalysis {
   bars: number[];
   bpm: number;
   energy: number;
   genre: string;
+  mood: MoodType;
+  structure: TrackStructure;
+  structureProgress: number; // 0-1, насколько длится текущий сегмент
+  energyTrend: "rising" | "falling" | "stable";
   isListening: boolean;
   error: string | null;
 }
@@ -28,22 +43,16 @@ function detectBPM(energyHistory: number[]): number {
     intervals.push(beats[i] - beats[i - 1]);
   }
   const avgInterval = intervals.reduce((a, b) => a + b, 0) / intervals.length;
-  // 60fps assumed, interval in frames → BPM
   const bpm = Math.round(60 / (avgInterval / 60));
   return Math.min(200, Math.max(60, bpm));
 }
 
-// Genre detection by frequency distribution
-function detectGenre(
-  lowEnergy: number,
-  midEnergy: number,
-  highEnergy: number,
-  bpm: number
-): string {
-  const total = lowEnergy + midEnergy + highEnergy + 0.001;
-  const lowR = lowEnergy / total;
-  const midR = midEnergy / total;
-  const highR = highEnergy / total;
+// Genre detection
+function detectGenre(lowE: number, midE: number, highE: number, bpm: number): string {
+  const total = lowE + midE + highE + 0.001;
+  const lowR = lowE / total;
+  const midR = midE / total;
+  const highR = highE / total;
 
   if (bpm >= 130 && bpm <= 160 && lowR > 0.45) return "Techno";
   if (bpm >= 120 && bpm <= 135 && midR > 0.35) return "House";
@@ -55,12 +64,111 @@ function detectGenre(
   return "Electronic";
 }
 
+// Mood detection based on energy bands + bpm + energy level
+function detectMood(
+  lowE: number,
+  midE: number,
+  highE: number,
+  bpm: number,
+  energy: number,
+  trend: "rising" | "falling" | "stable"
+): MoodType {
+  const total = lowE + midE + highE + 0.001;
+  const lowR = lowE / total;
+  const midR = midE / total;
+  const highR = highE / total;
+
+  // Нарастающее напряжение (buildup feeling)
+  if (trend === "rising" && energy > 0.3 && energy < 0.75) return "tense";
+
+  // Высокая энергия + быстрый темп + сильный бас = агрессия
+  if (energy > 0.6 && bpm > 130 && lowR > 0.45) return "aggressive";
+
+  // Высокая энергия + много верхов = эйфория (House/Pop drop)
+  if (energy > 0.55 && highR > 0.3 && bpm > 120) return "euphoric";
+
+  // Высокая общая энергия
+  if (energy > 0.6 && bpm > 100) return "energetic";
+
+  // Тёмный: средняя/низкая энергия, доминирует бас, мало верхов
+  if (lowR > 0.5 && highR < 0.15 && bpm >= 100 && bpm <= 145) return "dark";
+
+  // Меланхолия: низкая энергия, средние частоты преобладают
+  if (energy < 0.3 && midR > 0.45) return "melancholic";
+
+  // Монотонная гипнотическая: стабильная энергия, bpm 120-145
+  if (trend === "stable" && bpm >= 120 && bpm <= 145 && energy > 0.2 && energy < 0.5) return "hypnotic";
+
+  // Расслабленное: низкая энергия, низкий bpm
+  if (energy < 0.25 && bpm < 110) return "relaxed";
+
+  return "energetic";
+}
+
+// Track structure detection
+// Анализирует долгосрочную историю энергии для определения структурного момента
+function detectStructure(
+  energyLongHistory: number[], // ~10 секунд истории
+  energy: number,
+  trend: "rising" | "falling" | "stable",
+  secondsInSegment: number
+): { structure: TrackStructure; progress: number } {
+  if (energyLongHistory.length < 30) return { structure: "unknown", progress: 0 };
+
+  const windowLen = energyLongHistory.length;
+  const recent = energyLongHistory.slice(-30); // последние ~0.5с
+  const older = energyLongHistory.slice(0, Math.floor(windowLen / 2));
+
+  const avgRecent = recent.reduce((a, b) => a + b, 0) / recent.length;
+  const avgOlder = older.reduce((a, b) => a + b, 0) / older.length;
+  const longMean = energyLongHistory.reduce((a, b) => a + b, 0) / windowLen;
+
+  // Разброс энергии (вариативность)
+  const variance = energyLongHistory.reduce((a, b) => a + (b - longMean) ** 2, 0) / windowLen;
+  const stdDev = Math.sqrt(variance);
+
+  // Нормализованный прогресс сегмента (0-1, max 32 секунды)
+  const progress = Math.min(1, secondsInSegment / 32);
+
+  // DROP: высокая энергия, много вариативности (биты), пришли после buildup
+  if (avgRecent > 0.5 && stdDev > 0.08 && trend !== "rising") {
+    return { structure: "drop", progress };
+  }
+
+  // BUILDUP: энергия нарастает к пику
+  if (trend === "rising" && avgRecent > avgOlder * 1.15 && avgRecent < 0.75) {
+    return { structure: "buildup", progress };
+  }
+
+  // BREAKDOWN: низкая энергия после дропа (тихий участок)
+  if (avgRecent < 0.2 && avgOlder > 0.35) {
+    return { structure: "breakdown", progress };
+  }
+
+  // INTRO: начало трека — нарастает с нуля, долго низкая энергия
+  if (avgRecent < 0.25 && avgOlder < 0.2 && trend !== "falling") {
+    return { structure: "intro", progress };
+  }
+
+  // OUTRO: падающая энергия к концу
+  if (trend === "falling" && avgRecent < longMean * 0.7 && avgRecent < 0.3) {
+    return { structure: "outro", progress };
+  }
+
+  // По умолчанию: drop (активная часть)
+  return { structure: "drop", progress };
+}
+
 export function useWebAudio() {
   const [analysis, setAnalysis] = useState<AudioAnalysis>({
     bars: Array.from({ length: BAR_COUNT }, () => 0.02),
     bpm: 0,
     energy: 0,
     genre: "—",
+    mood: "relaxed",
+    structure: "unknown",
+    structureProgress: 0,
+    energyTrend: "stable",
     isListening: false,
     error: null,
   });
@@ -70,10 +178,25 @@ export function useWebAudio() {
   const sourceRef = useRef<MediaStreamAudioSourceNode | null>(null);
   const streamRef = useRef<MediaStream | null>(null);
   const rafRef = useRef<number>(0);
+
+  // Short-term energy history (3 sec ~180 frames for BPM)
   const energyHistoryRef = useRef<number[]>([]);
+  // Long-term energy history (~10 sec ~600 frames for structure)
+  const energyLongHistoryRef = useRef<number[]>([]);
+  // Trend detection: last 60 frames (~1 sec)
+  const energyTrendWindowRef = useRef<number[]>([]);
+
   const detectedBpmRef = useRef<number>(0);
   const bpmSmoothRef = useRef<number>(0);
   const genreRef = useRef<string>("—");
+  const moodRef = useRef<MoodType>("relaxed");
+  const structureRef = useRef<TrackStructure>("unknown");
+  const structureProgressRef = useRef<number>(0);
+  const energyTrendRef = useRef<"rising" | "falling" | "stable">("stable");
+
+  // Segment timer: сколько секунд в текущем структурном состоянии
+  const segmentStartTimeRef = useRef<number>(Date.now());
+  const lastStructureRef = useRef<TrackStructure>("unknown");
 
   const stop = useCallback(() => {
     cancelAnimationFrame(rafRef.current);
@@ -109,7 +232,6 @@ export function useWebAudio() {
       const sampleRate = ctx.sampleRate;
       const binSize = sampleRate / FFT_SIZE;
 
-      // Frequency ranges (Hz)
       const lowEnd = Math.floor(200 / binSize);
       const midEnd = Math.floor(2000 / binSize);
       const highEnd = Math.floor(8000 / binSize);
@@ -120,7 +242,7 @@ export function useWebAudio() {
         analyser.getByteFrequencyData(freqData);
         const binCount = freqData.length;
 
-        // Build display bars (32 bars from freq data)
+        // Build display bars
         const bars: number[] = [];
         const binsPerBar = Math.floor(binCount / BAR_COUNT);
         for (let i = 0; i < BAR_COUNT; i++) {
@@ -140,30 +262,83 @@ export function useWebAudio() {
         const lowE = lowSum / (lowEnd * 255);
         const midE = midSum / ((midEnd - lowEnd) * 255);
         const highE = highSum / ((Math.min(highEnd, binCount) - midEnd) * 255);
-        const totalEnergy = (lowE * 0.5 + midE * 0.35 + highE * 0.15);
+        const totalEnergy = lowE * 0.5 + midE * 0.35 + highE * 0.15;
+        const displayEnergy = Math.min(1, totalEnergy * 2.5);
 
-        // BPM via energy history
+        // BPM history (3 sec)
         energyHistoryRef.current.push(totalEnergy);
         if (energyHistoryRef.current.length > 180) energyHistoryRef.current.shift();
 
+        // Long-term history (10 sec)
+        energyLongHistoryRef.current.push(displayEnergy);
+        if (energyLongHistoryRef.current.length > 600) energyLongHistoryRef.current.shift();
+
+        // Trend window (1 sec)
+        energyTrendWindowRef.current.push(displayEnergy);
+        if (energyTrendWindowRef.current.length > 60) energyTrendWindowRef.current.shift();
+
         frameCount++;
+
+        // Every 90 frames (~1.5 sec): update BPM, genre, mood, structure
         if (frameCount % 90 === 0) {
+          // BPM
           const raw = detectBPM(energyHistoryRef.current);
           if (raw > 0) detectedBpmRef.current = raw;
-          // smooth BPM
           if (detectedBpmRef.current > 0) {
             bpmSmoothRef.current = bpmSmoothRef.current === 0
               ? detectedBpmRef.current
               : Math.round(bpmSmoothRef.current * 0.7 + detectedBpmRef.current * 0.3);
           }
+
+          // Genre
           genreRef.current = detectGenre(lowE, midE, highE, bpmSmoothRef.current);
+
+          // Energy trend (rising/falling/stable)
+          const tw = energyTrendWindowRef.current;
+          if (tw.length >= 30) {
+            const first = tw.slice(0, 15).reduce((a, b) => a + b, 0) / 15;
+            const last = tw.slice(-15).reduce((a, b) => a + b, 0) / 15;
+            const diff = last - first;
+            if (diff > 0.05) energyTrendRef.current = "rising";
+            else if (diff < -0.05) energyTrendRef.current = "falling";
+            else energyTrendRef.current = "stable";
+          }
+
+          // Mood
+          moodRef.current = detectMood(
+            lowE, midE, highE,
+            bpmSmoothRef.current,
+            displayEnergy,
+            energyTrendRef.current
+          );
+
+          // Structure
+          const secondsInSegment = (Date.now() - segmentStartTimeRef.current) / 1000;
+          const { structure, progress } = detectStructure(
+            energyLongHistoryRef.current,
+            displayEnergy,
+            energyTrendRef.current,
+            secondsInSegment
+          );
+          structureRef.current = structure;
+          structureProgressRef.current = progress;
+
+          // Сбрасываем таймер сегмента при смене структуры
+          if (structure !== lastStructureRef.current) {
+            segmentStartTimeRef.current = Date.now();
+            lastStructureRef.current = structure;
+          }
         }
 
         setAnalysis({
           bars,
           bpm: bpmSmoothRef.current,
-          energy: Math.min(1, totalEnergy * 2.5),
+          energy: displayEnergy,
           genre: genreRef.current,
+          mood: moodRef.current,
+          structure: structureRef.current,
+          structureProgress: structureProgressRef.current,
+          energyTrend: energyTrendRef.current,
           isListening: true,
           error: null,
         });

@@ -1,10 +1,13 @@
 import { useState, useEffect, useCallback, useRef } from "react";
 import Icon from "@/components/ui/icon";
 import { useWebAudio } from "@/hooks/useWebAudio";
+import type { MoodType, TrackStructure } from "@/hooks/useWebAudio";
+import { generateScene, getDefaultSceneFixtures } from "@/hooks/useSceneEngine";
+import type { GeneratedScene, FixtureInScene } from "@/hooks/useSceneEngine";
 import { presetsApi, historyApi, settingsApi, artnetApi, type ApiPreset, type ApiEvent, type ApiSettings } from "@/lib/api";
 
 // ─── Types ───────────────────────────────────────────────────────────────────
-type TabId = "dmx" | "audio" | "library" | "settings" | "history" | "scene3d";
+type TabId = "dmx" | "audio" | "library" | "settings" | "history" | "scene3d" | "autoscene";
 
 interface DmxChannel {
   id: number;
@@ -370,7 +373,7 @@ function DmxPanel() {
 // ─── Audio Panel ──────────────────────────────────────────────────────────────
 function AudioPanel() {
   const { analysis, start, stop } = useWebAudio();
-  const { bars, bpm, energy, genre, isListening, error } = analysis;
+  const { bars, bpm, energy, genre, mood, structure, energyTrend, isListening, error } = analysis;
 
   const barColors = ["#3b82f6", "#06b6d4", "#22c55e", "#f59e0b", "#ef4444", "#a855f7"];
 
@@ -469,6 +472,27 @@ function AudioPanel() {
             <div className="font-mono-tech text-xs" style={{ color }}>{value}</div>
           </div>
         ))}
+      </div>
+
+      {/* Mood + Structure */}
+      <div className="grid grid-cols-2 gap-2 mb-3">
+        <div className="bg-zinc-900 border p-2 rounded" style={{ borderColor: `${MOOD_COLORS[mood] || "#27272a"}44` }}>
+          <div className="font-display text-[9px] tracking-widest text-zinc-500 mb-1">НАСТРОЕНИЕ</div>
+          <div className="font-mono-tech text-xs" style={{ color: MOOD_COLORS[mood] || "#52525b" }}>
+            {MOOD_LABELS[mood] || mood}
+          </div>
+        </div>
+        <div className="bg-zinc-900 border p-2 rounded" style={{ borderColor: `${STRUCTURE_COLORS[structure] || "#27272a"}44` }}>
+          <div className="font-display text-[9px] tracking-widest text-zinc-500 mb-1">СТРУКТУРА</div>
+          <div className="flex items-center gap-1.5">
+            <div className="font-mono-tech text-xs" style={{ color: STRUCTURE_COLORS[structure] || "#52525b" }}>
+              {STRUCTURE_LABELS[structure] || structure}
+            </div>
+            <span className="font-mono-tech text-[10px] text-zinc-600">
+              {energyTrend === "rising" ? "↑" : energyTrend === "falling" ? "↓" : "→"}
+            </span>
+          </div>
+        </div>
       </div>
 
       {/* Energy bar */}
@@ -1059,6 +1083,299 @@ function HistoryPanel() {
   );
 }
 
+// ─── Auto Scene Panel ─────────────────────────────────────────────────────────
+
+const MOOD_LABELS: Record<MoodType, string> = {
+  aggressive:  "АГРЕССИВНОЕ",
+  euphoric:    "ЭЙФОРИЯ",
+  dark:        "ТЁМНОЕ",
+  melancholic: "МЕЛАНХОЛИЯ",
+  tense:       "НАПРЯЖЕНИЕ",
+  relaxed:     "РАССЛАБЛЕНИЕ",
+  hypnotic:    "ГИПНОЗ",
+  energetic:   "ЭНЕРГИЯ",
+};
+
+const MOOD_COLORS: Record<MoodType, string> = {
+  aggressive:  "#ef4444",
+  euphoric:    "#06b6d4",
+  dark:        "#6366f1",
+  melancholic: "#3b82f6",
+  tense:       "#f97316",
+  relaxed:     "#22c55e",
+  hypnotic:    "#a855f7",
+  energetic:   "#f59e0b",
+};
+
+const STRUCTURE_LABELS: Record<TrackStructure, string> = {
+  intro:      "ИНТРО",
+  buildup:    "BUILD-UP",
+  drop:       "DROP",
+  breakdown:  "BREAKDOWN",
+  outro:      "АУТРО",
+  unknown:    "АНАЛИЗ...",
+};
+
+const STRUCTURE_COLORS: Record<TrackStructure, string> = {
+  intro:      "#3b82f6",
+  buildup:    "#f97316",
+  drop:       "#ef4444",
+  breakdown:  "#6366f1",
+  outro:      "#22c55e",
+  unknown:    "#52525b",
+};
+
+function AutoScenePanel() {
+  const { analysis, start, stop } = useWebAudio();
+  const { mood, structure, structureProgress, energyTrend, bpm, energy, genre, isListening, error } = analysis;
+
+  const [autoSend, setAutoSend] = useState(false);
+  const [fixtures, setFixtures] = useState<FixtureInScene[]>(getDefaultSceneFixtures);
+  const [scene, setScene] = useState<GeneratedScene | null>(null);
+  const [sending, setSending] = useState(false);
+  const [lastSent, setLastSent] = useState<string | null>(null);
+  const [sendInterval, setSendInterval] = useState(2000); // ms между авто-отправками
+
+  const lastSceneKeyRef = useRef<string>("");
+  const autoSendTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
+
+  // Генерируем сцену при изменении анализа
+  useEffect(() => {
+    if (!isListening) return;
+    const newScene = generateScene(analysis, fixtures);
+    setScene(newScene);
+  }, [analysis, fixtures, isListening]);
+
+  // Авто-отправка DMX
+  useEffect(() => {
+    if (autoSendTimerRef.current) clearInterval(autoSendTimerRef.current);
+    if (!autoSend || !isListening) return;
+
+    autoSendTimerRef.current = setInterval(async () => {
+      if (!scene) return;
+      const key = `${scene.mood}_${scene.structure}`;
+      const channels = scene.dmxValues.slice(0, 16);
+      setSending(true);
+      const res = await artnetApi.send(channels);
+      if (res.ok) {
+        setLastSent(new Date().toLocaleTimeString("ru-RU"));
+        if (key !== lastSceneKeyRef.current) {
+          lastSceneKeyRef.current = key;
+          await historyApi.add("ai",
+            `AutoScene: ${scene.name} · ${scene.description}`,
+            { mood: scene.mood, structure: scene.structure, bpm }
+          );
+        }
+      }
+      setSending(false);
+    }, sendInterval);
+
+    return () => {
+      if (autoSendTimerRef.current) clearInterval(autoSendTimerRef.current);
+    };
+  }, [autoSend, isListening, scene, sendInterval, bpm]);
+
+  const handleManualSend = async () => {
+    if (!scene) return;
+    setSending(true);
+    const channels = scene.dmxValues.slice(0, 16);
+    const res = await artnetApi.send(channels);
+    if (res.ok) {
+      setLastSent(new Date().toLocaleTimeString("ru-RU"));
+      await historyApi.add("manual",
+        `Ручная отправка сцены: ${scene.name}`,
+        { mood: scene.mood, structure: scene.structure }
+      );
+    }
+    setSending(false);
+  };
+
+  const moodColor = MOOD_COLORS[mood] || "#52525b";
+  const structureColor = STRUCTURE_COLORS[structure] || "#52525b";
+
+  return (
+    <div className="h-full flex flex-col gap-3 overflow-y-auto">
+      <PanelHeader title="Auto Scene" icon="Sparkles" accent="#a855f7" />
+
+      {/* Статус микрофона */}
+      <div className="flex items-center gap-3 p-3 bg-zinc-900 border rounded"
+        style={{ borderColor: isListening ? "rgba(168,85,247,0.4)" : "rgba(63,63,70,0.8)" }}>
+        <div className={`w-2 h-2 rounded-full shrink-0 ${isListening ? "bg-green-400 animate-pulse" : "bg-zinc-600"}`} />
+        <span className="font-display text-[10px] tracking-widest text-zinc-500 flex-1">
+          {isListening ? "СЛУШАЮ МУЗЫКУ" : "МИК ОТКЛЮЧЁН"}
+        </span>
+        <button
+          onClick={isListening ? stop : start}
+          className="px-3 py-1 text-[10px] font-display tracking-widest border rounded transition-all"
+          style={{
+            borderColor: isListening ? "rgba(239,68,68,0.5)" : "rgba(34,197,94,0.5)",
+            color: isListening ? "#ef4444" : "#22c55e",
+            background: isListening ? "rgba(239,68,68,0.08)" : "rgba(34,197,94,0.08)",
+          }}
+        >
+          {isListening ? "■ СТОП" : "▶ СЛУШАТЬ"}
+        </button>
+      </div>
+
+      {error && (
+        <div className="px-3 py-2 bg-red-950/40 border border-red-500/30 rounded">
+          <span className="font-mono-tech text-[10px] text-red-400">⚠ {error}</span>
+        </div>
+      )}
+
+      {/* Анализ музыки — текущее состояние */}
+      <div className="grid grid-cols-2 gap-2">
+        {/* Настроение */}
+        <div className="p-3 bg-zinc-900 border rounded flex flex-col gap-1"
+          style={{ borderColor: `${moodColor}33` }}>
+          <span className="font-display text-[9px] tracking-widest text-zinc-500">НАСТРОЕНИЕ</span>
+          <span className="font-mono-tech text-sm font-bold" style={{ color: moodColor }}>
+            {MOOD_LABELS[mood] || mood}
+          </span>
+          <div className="h-1 bg-zinc-800 rounded-full overflow-hidden mt-1">
+            <div className="h-full rounded-full transition-all duration-300"
+              style={{ width: `${energy * 100}%`, background: moodColor, boxShadow: `0 0 6px ${moodColor}88` }} />
+          </div>
+        </div>
+
+        {/* Структура трека */}
+        <div className="p-3 bg-zinc-900 border rounded flex flex-col gap-1"
+          style={{ borderColor: `${structureColor}33` }}>
+          <span className="font-display text-[9px] tracking-widest text-zinc-500">СТРУКТУРА ТРЕКА</span>
+          <span className="font-mono-tech text-sm font-bold" style={{ color: structureColor }}>
+            {STRUCTURE_LABELS[structure] || structure}
+          </span>
+          <div className="h-1 bg-zinc-800 rounded-full overflow-hidden mt-1">
+            <div className="h-full rounded-full transition-all duration-500"
+              style={{ width: `${structureProgress * 100}%`, background: structureColor, boxShadow: `0 0 6px ${structureColor}88` }} />
+          </div>
+        </div>
+      </div>
+
+      {/* Мини-статистика */}
+      <div className="grid grid-cols-4 gap-1.5">
+        {[
+          { label: "BPM",    value: bpm > 0 ? String(bpm) : "—",   color: "#f59e0b" },
+          { label: "ЖАНР",   value: genre,                           color: "#06b6d4" },
+          { label: "ЭНЕРГИЯ", value: `${Math.round(energy * 100)}%`, color: "#22c55e" },
+          { label: "ТРЕНД",  value: energyTrend === "rising" ? "↑" : energyTrend === "falling" ? "↓" : "→", color: "#a855f7" },
+        ].map(({ label, value, color }) => (
+          <div key={label} className="bg-zinc-900 border border-zinc-800 p-2 rounded text-center">
+            <div className="font-display text-[8px] tracking-widest text-zinc-600 mb-0.5">{label}</div>
+            <div className="font-mono-tech text-xs" style={{ color }}>{value}</div>
+          </div>
+        ))}
+      </div>
+
+      {/* Текущая сцена */}
+      {scene && isListening ? (
+        <div className="p-3 bg-zinc-900 border rounded" style={{ borderColor: "rgba(168,85,247,0.3)" }}>
+          <div className="flex items-center justify-between mb-2">
+            <span className="font-display text-[9px] tracking-widest text-purple-400">АКТИВНАЯ СЦЕНА</span>
+            {sending && <span className="font-mono-tech text-[9px] text-amber-400 animate-pulse">ОТПРАВКА...</span>}
+            {lastSent && !sending && <span className="font-mono-tech text-[9px] text-green-500">✓ {lastSent}</span>}
+          </div>
+          <div className="font-mono-tech text-base font-bold text-white mb-0.5">{scene.name}</div>
+          <div className="font-body text-[11px] text-zinc-500 mb-3">{scene.description}</div>
+
+          {/* Приборы сцены */}
+          <div className="space-y-1.5 max-h-40 overflow-y-auto pr-1">
+            {scene.fixtureStates.map(fs => (
+              <div key={fs.fixtureId} className="flex items-center gap-2 px-2 py-1 bg-zinc-800/60 rounded">
+                <div className="w-3 h-3 rounded-full shrink-0 border border-zinc-600"
+                  style={{ background: fs.color, boxShadow: `0 0 6px ${fs.color}88` }} />
+                <span className="font-mono-tech text-[9px] text-zinc-400 flex-1 truncate">{fs.fixtureName}</span>
+                <span className="font-display text-[8px] tracking-widest text-zinc-600">{fs.fixtureType}</span>
+                <span className="font-mono-tech text-[9px]" style={{ color: fs.color }}>{fs.intensity}%</span>
+              </div>
+            ))}
+          </div>
+        </div>
+      ) : (
+        <div className="p-4 bg-zinc-900 border border-zinc-800 rounded text-center">
+          <span className="font-display text-[10px] tracking-widest text-zinc-600">
+            {isListening ? "Генерация сцены..." : "Включите микрофон для анализа"}
+          </span>
+        </div>
+      )}
+
+      {/* Управление автоотправкой */}
+      <div className="p-3 bg-zinc-900 border rounded" style={{ borderColor: "rgba(6,182,212,0.25)" }}>
+        <div className="flex items-center justify-between mb-3">
+          <span className="font-display text-xs tracking-widest text-cyan-400">АВТОПИЛОТ DMX</span>
+          <div className="flex items-center gap-2">
+            <span className="font-mono-tech text-[10px] text-zinc-500">
+              {autoSend ? "ВКЛЮЧЁН" : "ВЫКЛЮЧЕН"}
+            </span>
+            <button
+              onClick={() => setAutoSend(v => !v)}
+              className="px-3 py-1 text-[10px] font-display tracking-widest border rounded transition-all"
+              style={{
+                borderColor: autoSend ? "rgba(239,68,68,0.5)" : "rgba(34,197,94,0.5)",
+                color: autoSend ? "#ef4444" : "#22c55e",
+                background: autoSend ? "rgba(239,68,68,0.08)" : "rgba(34,197,94,0.08)",
+              }}
+            >
+              {autoSend ? "■ СТОП" : "▶ СТАРТ"}
+            </button>
+          </div>
+        </div>
+
+        {/* Интервал отправки */}
+        <div>
+          <div className="flex justify-between mb-1">
+            <span className="font-display text-[9px] tracking-widest text-zinc-500">ИНТЕРВАЛ ОБНОВЛЕНИЯ</span>
+            <span className="font-mono-tech text-[10px] text-cyan-400">{sendInterval}ms</span>
+          </div>
+          <input type="range" min={500} max={5000} step={500} value={sendInterval}
+            onChange={e => setSendInterval(+e.target.value)}
+            className="w-full h-1 appearance-none bg-zinc-800 rounded cursor-pointer"
+            style={{ accentColor: "#06b6d4" }}
+          />
+        </div>
+      </div>
+
+      {/* Ручная отправка */}
+      <button
+        onClick={handleManualSend}
+        disabled={sending || !scene || !isListening}
+        className="w-full py-2.5 font-display text-[10px] tracking-widest border rounded transition-all flex items-center justify-center gap-2"
+        style={{
+          borderColor: scene && isListening ? "rgba(168,85,247,0.5)" : "rgba(63,63,70,0.5)",
+          color: scene && isListening ? "#a855f7" : "#52525b",
+          background: scene && isListening ? "rgba(168,85,247,0.08)" : "transparent",
+        }}
+      >
+        <Icon name="Send" size={12} />
+        ОТПРАВИТЬ СЦЕНУ ВРУЧНУЮ
+      </button>
+
+      {/* Настройка приборов */}
+      <div className="p-3 bg-zinc-900 border border-zinc-800 rounded">
+        <div className="flex items-center justify-between mb-2">
+          <span className="font-display text-[9px] tracking-widest text-zinc-500">ПРИБОРЫ В СЦЕНЕ ({fixtures.length})</span>
+          <button
+            onClick={() => setFixtures(getDefaultSceneFixtures())}
+            className="font-display text-[9px] tracking-widest text-zinc-600 hover:text-zinc-400 transition-colors"
+          >
+            СБРОС
+          </button>
+        </div>
+        <div className="space-y-1 max-h-32 overflow-y-auto">
+          {fixtures.map((f, idx) => (
+            <div key={f.id} className="flex items-center gap-2 text-[10px]">
+              <span className="font-mono-tech text-zinc-700 w-4">{idx + 1}</span>
+              <span className="font-mono-tech text-zinc-400 flex-1 truncate">{f.name}</span>
+              <span className="font-display tracking-widest text-zinc-600">{f.type}</span>
+              <span className="font-mono-tech text-zinc-700">CH{f.dmxStartChannel}</span>
+            </div>
+          ))}
+        </div>
+      </div>
+    </div>
+  );
+}
+
 // ─── 3D Scene Panel ───────────────────────────────────────────────────────────
 function Scene3DPanel() {
   const [selected, setSelected] = useState<number | null>(null);
@@ -1178,12 +1495,13 @@ function Scene3DPanel() {
 
 // ─── Main App ─────────────────────────────────────────────────────────────────
 const TABS: { id: TabId; label: string; icon: string; accent: string }[] = [
-  { id: "dmx", label: "DMX", icon: "Sliders", accent: "#06b6d4" },
-  { id: "audio", label: "Аудио", icon: "Activity", accent: "#a855f7" },
-  { id: "library", label: "Библиотека", icon: "BookOpen", accent: "#f59e0b" },
-  { id: "settings", label: "Настройки", icon: "Settings", accent: "#22c55e" },
-  { id: "history", label: "История", icon: "Clock", accent: "#3b82f6" },
-  { id: "scene3d", label: "3D Сцена", icon: "Box", accent: "#06b6d4" },
+  { id: "dmx",       label: "DMX",       icon: "Sliders",   accent: "#06b6d4" },
+  { id: "audio",     label: "Аудио",     icon: "Activity",  accent: "#a855f7" },
+  { id: "autoscene", label: "AutoScene", icon: "Sparkles",  accent: "#a855f7" },
+  { id: "library",   label: "Библиотека", icon: "BookOpen", accent: "#f59e0b" },
+  { id: "settings",  label: "Настройки", icon: "Settings",  accent: "#22c55e" },
+  { id: "history",   label: "История",   icon: "Clock",     accent: "#3b82f6" },
+  { id: "scene3d",   label: "3D Сцена",  icon: "Box",       accent: "#06b6d4" },
 ];
 
 export default function Index() {
@@ -1196,12 +1514,13 @@ export default function Index() {
   }, []);
 
   const panels: Record<TabId, JSX.Element> = {
-    dmx: <DmxPanel />,
-    audio: <AudioPanel />,
-    library: <LibraryPanel />,
-    settings: <SettingsPanel />,
-    history: <HistoryPanel />,
-    scene3d: <Scene3DPanel />,
+    dmx:       <DmxPanel />,
+    audio:     <AudioPanel />,
+    autoscene: <AutoScenePanel />,
+    library:   <LibraryPanel />,
+    settings:  <SettingsPanel />,
+    history:   <HistoryPanel />,
+    scene3d:   <Scene3DPanel />,
   };
 
   return (
