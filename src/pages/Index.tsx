@@ -1,10 +1,29 @@
-import { useState, useEffect, useCallback, useRef } from "react";
+import React, { useState, useEffect, useCallback, useRef, createContext, useContext } from "react";
 import Icon from "@/components/ui/icon";
 import { useWebAudio } from "@/hooks/useWebAudio";
-import type { MoodType, TrackStructure } from "@/hooks/useWebAudio";
+import type { AudioAnalysis, MoodType, TrackStructure } from "@/hooks/useWebAudio";
 import { generateScene, getDefaultSceneFixtures, getSmallRigFixtures, validateFixtures, nextChannel } from "@/hooks/useSceneEngine";
 import type { GeneratedScene, FixtureInScene, FixtureGroup, EventType, VenueSize, ShowPolicy, DirectorMode } from "@/hooks/useSceneEngine";
 import { presetsApi, historyApi, settingsApi, artnetApi, type ApiPreset, type ApiEvent, type ApiSettings } from "@/lib/api";
+
+// ─── Audio Context — единственный экземпляр useWebAudio на всё приложение ────
+// Это решает проблему: смена вкладки → размонтирование компонента → остановка микрофона.
+// Все компоненты читают одно и то же состояние через useAudioContext().
+
+interface AudioContextValue {
+  analysis: AudioAnalysis;
+  start: () => Promise<void>;
+  stop: () => void;
+  triggerShazam: () => void;
+}
+
+const AudioCtx = createContext<AudioContextValue | null>(null);
+
+function useAudioContext(): AudioContextValue {
+  const ctx = useContext(AudioCtx);
+  if (!ctx) throw new Error("useAudioContext must be used inside AudioProvider");
+  return ctx;
+}
 
 // ─── Types ───────────────────────────────────────────────────────────────────
 type TabId = "dmx" | "audio" | "library" | "settings" | "history" | "scene3d" | "autoscene";
@@ -374,7 +393,7 @@ function DmxPanel() {
 
 // ─── Audio Panel ──────────────────────────────────────────────────────────────
 function AudioPanel() {
-  const { analysis, start, stop } = useWebAudio();
+  const { analysis, start, stop } = useAudioContext();
   const { bars, bpm, energy, genre, mood, structure, energyTrend, isListening, error } = analysis;
 
   const barColors = ["#3b82f6", "#06b6d4", "#22c55e", "#f59e0b", "#ef4444", "#a855f7"];
@@ -1138,7 +1157,7 @@ const PHASE_LABELS: Record<string, string> = {
 };
 
 function AutoScenePanel() {
-  const { analysis, start, stop, triggerShazam } = useWebAudio();
+  const { analysis, start, stop, triggerShazam } = useAudioContext();
   const { mood, structure, structureProgress, energyTrend, bpm, energy, genre, trackFeatures, shazam, isListening, error } = analysis;
 
   // ─── Director parameters ──
@@ -1927,7 +1946,7 @@ function FixtureIcon({ type, color, size = 16 }: { type: Light3D["type"]; color:
 
 // ─── 3D Scene Panel ───────────────────────────────────────────────────────────
 function Scene3DPanel() {
-  const { analysis } = useWebAudio();
+  const { analysis } = useAudioContext();
   const { trackFeatures, energy, isListening } = analysis;
 
   const [selected, setSelected]     = useState<number | null>(null);
@@ -2312,6 +2331,14 @@ const TABS: { id: TabId; label: string; icon: string; accent: string }[] = [
   { id: "scene3d",   label: "3D Сцена",  icon: "Box",       accent: "#06b6d4" },
 ];
 
+// ─── Провайдер аудио-контекста ────────────────────────────────────────────────
+// Единственный экземпляр useWebAudio живёт здесь и не уничтожается при смене вкладок.
+
+function AudioProvider({ children }: { children: React.ReactNode }) {
+  const audio = useWebAudio();
+  return <AudioCtx.Provider value={audio}>{children}</AudioCtx.Provider>;
+}
+
 export default function Index() {
   const [activeTab, setActiveTab] = useState<TabId>("dmx");
   const [time, setTime] = useState(new Date());
@@ -2332,6 +2359,7 @@ export default function Index() {
   };
 
   return (
+    <AudioProvider>
     <div className="h-screen w-screen bg-zinc-950 flex flex-col overflow-hidden" style={{ fontFamily: "'Rajdhani', sans-serif" }}>
       {/* Top Bar */}
       <header className="flex items-center px-4 py-2 border-b border-zinc-800 bg-black/70 shrink-0">
@@ -2404,5 +2432,6 @@ export default function Index() {
         <span className="font-mono-tech text-[10px] text-green-500">● СИСТЕМА ГОТОВА</span>
       </footer>
     </div>
+    </AudioProvider>
   );
 }
