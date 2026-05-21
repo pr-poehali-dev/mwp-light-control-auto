@@ -35,11 +35,13 @@ interface HistoryEvent {
 interface Light3D {
   id: number;
   name: string;
+  type: "par" | "moving" | "strobe" | "wash" | "spot" | "laser" | "hazer";
   x: number;
   y: number;
   active: boolean;
-  color: string;
-  intensity: number;
+  color: string;      // hex цвет (обновляется из AI Director)
+  intensity: number;  // 0-100
+  liveColor?: string; // hex цвет из живой сцены (override)
 }
 
 // ─── Fixture Library Types ────────────────────────────────────────────────────
@@ -213,16 +215,16 @@ const HISTORY: HistoryEvent[] = [
 ];
 
 const LIGHTS_3D: Light3D[] = [
-  { id: 1, name: "LED Par L1", x: 15, y: 12, active: true, color: "cyan", intensity: 90 },
-  { id: 2, name: "LED Par L2", x: 35, y: 12, active: true, color: "purple", intensity: 70 },
-  { id: 3, name: "Spot C", x: 50, y: 8, active: true, color: "amber", intensity: 100 },
-  { id: 4, name: "LED Par R2", x: 65, y: 12, active: false, color: "cyan", intensity: 0 },
-  { id: 5, name: "LED Par R1", x: 85, y: 12, active: true, color: "green", intensity: 60 },
-  { id: 6, name: "Moving Head L", x: 25, y: 30, active: true, color: "cyan", intensity: 80 },
-  { id: 7, name: "Moving Head R", x: 75, y: 30, active: true, color: "purple", intensity: 80 },
-  { id: 8, name: "Strobe L", x: 10, y: 45, active: true, color: "amber", intensity: 45 },
-  { id: 9, name: "Strobe R", x: 90, y: 45, active: false, color: "amber", intensity: 0 },
-  { id: 10, name: "Wash C", x: 50, y: 62, active: true, color: "red", intensity: 55 },
+  { id: 1,  name: "LED Par L1",     type: "par",    x: 15, y: 10, active: true,  color: "#06b6d4", intensity: 90 },
+  { id: 2,  name: "LED Par L2",     type: "par",    x: 35, y: 10, active: true,  color: "#a855f7", intensity: 70 },
+  { id: 3,  name: "Spot C",         type: "spot",   x: 50, y: 7,  active: true,  color: "#f59e0b", intensity: 100 },
+  { id: 4,  name: "LED Par R2",     type: "par",    x: 65, y: 10, active: false, color: "#06b6d4", intensity: 0 },
+  { id: 5,  name: "LED Par R1",     type: "par",    x: 85, y: 10, active: true,  color: "#22c55e", intensity: 60 },
+  { id: 6,  name: "Moving Head L",  type: "moving", x: 25, y: 28, active: true,  color: "#06b6d4", intensity: 80 },
+  { id: 7,  name: "Moving Head R",  type: "moving", x: 75, y: 28, active: true,  color: "#a855f7", intensity: 80 },
+  { id: 8,  name: "Strobe L",       type: "strobe", x: 10, y: 44, active: true,  color: "#ffffff", intensity: 45 },
+  { id: 9,  name: "Strobe R",       type: "strobe", x: 90, y: 44, active: false, color: "#ffffff", intensity: 0 },
+  { id: 10, name: "Wash C",         type: "wash",   x: 50, y: 60, active: true,  color: "#ef4444", intensity: 55 },
 ];
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
@@ -1181,6 +1183,15 @@ function AutoScenePanel() {
     if (!isListening) return;
     const newScene = generateScene(analysis, fixtures, directorOptions);
     setScene(newScene);
+    // Прокидываем цвета в 3D-сцену через глобальный объект
+    if (newScene.fixtureStates.length > 0) {
+      const colorMap: Record<string, string> = {};
+      newScene.fixtureStates.forEach((fs, idx) => {
+        colorMap[String(idx)] = fs.color;
+        colorMap[String(fs.fixtureId)] = fs.color;
+      });
+      (window as Record<string, unknown>).__aiSceneColors = colorMap;
+    }
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [analysis, fixtures, eventType, venueSize, showPolicy, directorMode, artistStyle, crowdLevel, isListening]);
 
@@ -1272,34 +1283,64 @@ function AutoScenePanel() {
       <div className="bg-zinc-900 border rounded overflow-hidden"
         style={{ borderColor: shazam.status === "matched" ? "rgba(34,197,94,0.3)" : "rgba(63,63,70,0.7)" }}>
 
-        {/* Заголовок */}
-        <div className="flex items-center justify-between px-2.5 pt-2.5 pb-1.5">
-          <div className="flex items-center gap-2">
-            <span className="font-display text-[9px] tracking-widest"
-              style={{ color: shazam.status === "matched" ? "#22c55e" : shazam.status === "loading" ? "#f59e0b" : shazam.status === "error" ? "#ef4444" : "#52525b" }}>
-              SHAZAM
-            </span>
-            {shazam.status === "loading" && <span className="font-mono-tech text-[8px] text-amber-400 animate-pulse">РАСПОЗНАЮ...</span>}
-            {shazam.status === "matched" && <span className="font-mono-tech text-[8px] text-green-500">✓ НАЙДЕНО</span>}
-            {shazam.status === "no_match" && <span className="font-mono-tech text-[8px] text-zinc-600">НЕ НАЙДЕНО</span>}
-            {shazam.status === "error" && (
-              <span className="font-mono-tech text-[8px] text-red-400 cursor-pointer" onClick={() => setKeyInputOpen(v => !v)}>
-                ⚠ КЛЮЧ?
+        {/* Заголовок + название трека */}
+        <div className="px-2.5 pt-2 pb-1.5">
+          <div className="flex items-center justify-between mb-1">
+            <div className="flex items-center gap-2">
+              <span className="font-display text-[9px] tracking-widest"
+                style={{ color: shazam.status === "matched" ? "#22c55e" : shazam.status === "loading" ? "#f59e0b" : shazam.status === "error" ? "#ef4444" : "#52525b" }}>
+                SHAZAM
               </span>
-            )}
+              {shazam.status === "loading" && <span className="font-mono-tech text-[8px] text-amber-400 animate-pulse">СЛУШАЮ...</span>}
+              {shazam.status === "no_match" && <span className="font-mono-tech text-[8px] text-zinc-600">НЕ НАЙДЕНО</span>}
+              {shazam.status === "error" && (
+                <span className="font-mono-tech text-[8px] text-red-400 cursor-pointer" onClick={() => setKeyInputOpen(v => !v)}>⚠ КЛЮЧ?</span>
+              )}
+            </div>
+            <div className="flex items-center gap-1.5">
+              <button onClick={() => setKeyInputOpen(v => !v)}
+                className="px-1.5 py-0.5 font-display text-[7px] tracking-widest border border-zinc-700 rounded text-zinc-600 hover:text-zinc-400 transition-colors">
+                KEY
+              </button>
+              <button onClick={triggerShazam}
+                disabled={shazam.status === "loading" || !isListening || !rapidApiKey}
+                className="px-2 py-0.5 font-display text-[8px] tracking-widest border rounded transition-all disabled:opacity-35"
+                style={{ borderColor: "rgba(34,197,94,0.4)", color: "#22c55e", background: "rgba(34,197,94,0.06)" }}>
+                ⚡
+              </button>
+            </div>
           </div>
-          <div className="flex items-center gap-1.5">
-            <button onClick={() => setKeyInputOpen(v => !v)}
-              className="px-1.5 py-0.5 font-display text-[7px] tracking-widest border border-zinc-700 rounded text-zinc-600 hover:text-zinc-400 transition-colors">
-              KEY
-            </button>
-            <button onClick={triggerShazam}
-              disabled={shazam.status === "loading" || !isListening || !rapidApiKey}
-              className="px-2 py-0.5 font-display text-[8px] tracking-widest border rounded transition-all disabled:opacity-35"
-              style={{ borderColor: "rgba(34,197,94,0.4)", color: "#22c55e", background: "rgba(34,197,94,0.06)" }}>
-              ⚡ РАСПОЗНАТЬ
-            </button>
-          </div>
+
+          {/* Название трека — всегда видно если есть результат */}
+          {shazam.track ? (
+            <div className="flex items-center gap-2 mt-0.5">
+              {shazam.track.cover_url && (
+                <img src={shazam.track.cover_url} alt="cover"
+                  className="w-8 h-8 rounded object-cover shrink-0 border border-zinc-700" />
+              )}
+              <div className="flex-1 min-w-0">
+                <div className="font-mono-tech text-[11px] text-white font-bold truncate leading-tight">
+                  {shazam.track.title}
+                </div>
+                <div className="font-body text-[10px] text-zinc-400 truncate leading-tight">
+                  {shazam.track.artist}
+                </div>
+                <div className="flex items-center gap-2 mt-0.5 flex-wrap">
+                  {shazam.track.genre && <span className="font-display text-[7px] tracking-widest text-cyan-500">{shazam.track.genre}</span>}
+                  {shazam.track.bpm > 0 && <span className="font-mono-tech text-[7px] text-amber-400">{shazam.track.bpm} BPM</span>}
+                  {shazam.track.key && <span className="font-mono-tech text-[7px] text-purple-400">{shazam.track.key}</span>}
+                </div>
+              </div>
+            </div>
+          ) : (
+            <div className="font-display text-[8px] tracking-widest text-zinc-700 mt-0.5">
+              {!rapidApiKey ? "Нажми KEY → добавь RapidAPI ключ" :
+               !isListening ? "Включи микрофон" :
+               shazam.status === "idle" ? "Первое распознавание через 8 сек..." :
+               shazam.status === "loading" ? "Анализирую..." :
+               "Трек не определён"}
+            </div>
+          )}
         </div>
 
         {/* Поле ввода ключа */}
@@ -1335,36 +1376,7 @@ function AutoScenePanel() {
           </div>
         )}
 
-        {/* Результат распознавания */}
-        {rapidApiKey && !keyInputOpen && (
-          <div className="px-2.5 pb-2.5">
-            {shazam.track ? (
-              <div className="flex items-center gap-2.5">
-                {shazam.track.cover_url && (
-                  <img src={shazam.track.cover_url} alt="cover"
-                    className="w-10 h-10 rounded object-cover shrink-0 border border-zinc-700" />
-                )}
-                <div className="flex-1 min-w-0">
-                  <div className="font-mono-tech text-xs text-white font-bold truncate">{shazam.track.title}</div>
-                  <div className="font-body text-[10px] text-zinc-400 truncate">{shazam.track.artist}</div>
-                  <div className="flex items-center gap-2 mt-0.5 flex-wrap">
-                    {shazam.track.genre && <span className="font-display text-[8px] tracking-widest text-cyan-400">{shazam.track.genre}</span>}
-                    {shazam.track.bpm > 0 && <span className="font-mono-tech text-[8px] text-amber-400">{shazam.track.bpm} BPM</span>}
-                    {shazam.track.key && <span className="font-mono-tech text-[8px] text-purple-400">{shazam.track.key}</span>}
-                  </div>
-                </div>
-              </div>
-            ) : (
-              <div className="font-display text-[8px] tracking-widest text-zinc-700">
-                {!isListening ? "Включи микрофон для распознавания" :
-                  shazam.status === "idle" ? "Автораспознавание через 8 сек..." :
-                  shazam.status === "loading" ? "Анализирую аудио..." :
-                  shazam.status === "error" ? "Ошибка API — проверь ключ" :
-                  "Трек не определён"}
-              </div>
-            )}
-          </div>
-        )}
+
       </div>
 
       {/* ─── Музыкальный анализ ─── */}
@@ -1717,27 +1729,161 @@ function AutoScenePanel() {
   );
 }
 
+// ─── Типы приборов для 3D-сцены ───────────────────────────────────────────────
+const FIXTURE_TYPES: { type: Light3D["type"]; label: string; icon: string; defaultColor: string }[] = [
+  { type: "par",    label: "LED Par",      icon: "Circle",      defaultColor: "#06b6d4" },
+  { type: "moving", label: "Moving Head",  icon: "Crosshair",   defaultColor: "#a855f7" },
+  { type: "strobe", label: "Strobe",       icon: "Zap",         defaultColor: "#ffffff" },
+  { type: "wash",   label: "Wash",         icon: "Layers",      defaultColor: "#ef4444" },
+  { type: "spot",   label: "Spot",         icon: "Sun",         defaultColor: "#f59e0b" },
+  { type: "laser",  label: "Laser",        icon: "Scan",        defaultColor: "#00ff88" },
+  { type: "hazer",  label: "Hazer/Fog",    icon: "Wind",        defaultColor: "#aaaaaa" },
+];
+
+// Иконка прибора в 3D-сцене
+function FixtureIcon({ type, color, size = 16 }: { type: Light3D["type"]; color: string; size?: number }) {
+  const iconMap: Record<Light3D["type"], string> = {
+    par: "Circle", moving: "Crosshair", strobe: "Zap",
+    wash: "Layers", spot: "Sun", laser: "Scan", hazer: "Wind",
+  };
+  return <Icon name={iconMap[type]} size={size} style={{ color }} />;
+}
+
 // ─── 3D Scene Panel ───────────────────────────────────────────────────────────
 function Scene3DPanel() {
-  const [selected, setSelected] = useState<number | null>(null);
-  const [lights, setLights] = useState<Light3D[]>(LIGHTS_3D);
+  const { analysis } = useWebAudio();
+  const { trackFeatures, energy, isListening } = analysis;
 
-  const colorHex: Record<string, string> = {
-    cyan: "#06b6d4", purple: "#a855f7", amber: "#f59e0b",
-    green: "#22c55e", red: "#ef4444", blue: "#3b82f6",
-  };
+  const [selected, setSelected]     = useState<number | null>(null);
+  const [lights, setLights]         = useState<Light3D[]>(LIGHTS_3D);
+  const [addMode, setAddMode]       = useState(false);
+  const [addType, setAddType]       = useState<Light3D["type"]>("par");
+  const [addName, setAddName]       = useState("");
+  const [dragging, setDragging]     = useState<number | null>(null);
+  const stageRef                    = useRef<HTMLDivElement>(null);
+  const nextIdRef                   = useRef(LIGHTS_3D.length + 1);
+
+  // Обновляем цвета приборов из AI Director через глобальный callback
+  useEffect(() => {
+    if (!isListening) return;
+    // Получаем цвета из последней сцены через window (прокидывается из AutoScenePanel)
+    const sceneColors = (window as Record<string, unknown>).__aiSceneColors as Record<string, string> | undefined;
+    if (!sceneColors) return;
+    setLights(prev => prev.map((l, idx) => {
+      const col = sceneColors[String(idx)] ?? sceneColors[String(l.id)];
+      if (col) return { ...l, liveColor: col, active: true, intensity: Math.round(energy * 100) };
+      return l;
+    }));
+  }, [energy, isListening, trackFeatures.onset_strength]);
 
   const selectedLight = lights.find(l => l.id === selected);
 
+  // Добавление прибора кликом по сцене
+  const handleStageClick = (e: React.MouseEvent<HTMLDivElement>) => {
+    if (!addMode) return;
+    const rect = stageRef.current?.getBoundingClientRect();
+    if (!rect) return;
+    const x = Math.round(((e.clientX - rect.left) / rect.width) * 100);
+    const y = Math.round(((e.clientY - rect.top)  / rect.height) * 100);
+    const ft = FIXTURE_TYPES.find(f => f.type === addType)!;
+    const id = nextIdRef.current++;
+    setLights(prev => [...prev, {
+      id, type: addType,
+      name: addName.trim() || `${ft.label} ${id}`,
+      x, y, active: true,
+      color: ft.defaultColor,
+      intensity: 80,
+    }]);
+    setAddName("");
+    setAddMode(false);
+  };
+
+  // Перетаскивание прибора
+  const handleDragStart = (e: React.MouseEvent, id: number) => {
+    e.stopPropagation();
+    setDragging(id);
+  };
+
+  const handleDragMove = (e: React.MouseEvent<HTMLDivElement>) => {
+    if (dragging === null) return;
+    const rect = stageRef.current?.getBoundingClientRect();
+    if (!rect) return;
+    const x = Math.min(98, Math.max(2, Math.round(((e.clientX - rect.left) / rect.width) * 100)));
+    const y = Math.min(98, Math.max(2, Math.round(((e.clientY - rect.top)  / rect.height) * 100)));
+    setLights(prev => prev.map(l => l.id === dragging ? { ...l, x, y } : l));
+  };
+
+  const handleDragEnd = () => setDragging(null);
+
+  // Удаление прибора
+  const deleteLight = (id: number) => {
+    setLights(prev => prev.filter(l => l.id !== id));
+    if (selected === id) setSelected(null);
+  };
+
   return (
-    <div className="h-full flex flex-col">
+    <div className="h-full flex flex-col gap-2 overflow-y-auto">
       <PanelHeader title="3D Scene" icon="Box" accent="#06b6d4" />
 
-      <div className="relative flex-1 bg-black/60 border border-zinc-800 rounded overflow-hidden mb-3" style={{ minHeight: 200 }}>
-        <div className="absolute bottom-0 left-0 right-0 h-1/3"
-          style={{ background: "linear-gradient(to top, rgba(9,9,11,0.8), transparent)", borderTop: "1px solid #18181b" }}
-        />
-        <svg className="absolute inset-0 w-full h-full opacity-[0.07]" xmlns="http://www.w3.org/2000/svg">
+      {/* ─── Панель управления ─── */}
+      <div className="flex items-center gap-2 flex-wrap">
+        <button
+          onClick={() => setAddMode(v => !v)}
+          className="px-2.5 py-1 font-display text-[9px] tracking-widest border rounded transition-all flex items-center gap-1.5"
+          style={{
+            borderColor: addMode ? "rgba(6,182,212,0.6)" : "rgba(63,63,70,0.8)",
+            color: addMode ? "#06b6d4" : "#52525b",
+            background: addMode ? "rgba(6,182,212,0.08)" : "transparent",
+          }}
+        >
+          <Icon name={addMode ? "MousePointer" : "Plus"} size={10} />
+          {addMode ? "КЛИКНИ ПО СЦЕНЕ" : "ДОБАВИТЬ"}
+        </button>
+
+        {addMode && (
+          <>
+            <select
+              value={addType}
+              onChange={e => setAddType(e.target.value as Light3D["type"])}
+              className="bg-zinc-800 border border-zinc-700 rounded px-2 py-0.5 text-[9px] font-display tracking-widest text-zinc-300 focus:outline-none cursor-pointer"
+            >
+              {FIXTURE_TYPES.map(f => (
+                <option key={f.type} value={f.type}>{f.label}</option>
+              ))}
+            </select>
+            <input
+              type="text"
+              value={addName}
+              onChange={e => setAddName(e.target.value)}
+              placeholder="Название..."
+              className="flex-1 bg-zinc-800 border border-zinc-700 rounded px-2 py-0.5 text-[9px] font-mono-tech text-zinc-300 focus:outline-none min-w-0"
+            />
+          </>
+        )}
+
+        <button
+          onClick={() => setLights(LIGHTS_3D)}
+          className="ml-auto px-2 py-1 font-display text-[8px] tracking-widest border border-zinc-800 text-zinc-600 rounded hover:text-zinc-400 transition-colors"
+        >
+          <Icon name="RotateCcw" size={10} />
+        </button>
+      </div>
+
+      {/* ─── 3D Сцена ─── */}
+      <div
+        ref={stageRef}
+        className="relative bg-black/70 border border-zinc-800 rounded overflow-hidden"
+        style={{
+          minHeight: 240,
+          cursor: addMode ? "crosshair" : dragging !== null ? "grabbing" : "default",
+        }}
+        onClick={handleStageClick}
+        onMouseMove={handleDragMove}
+        onMouseUp={handleDragEnd}
+        onMouseLeave={handleDragEnd}
+      >
+        {/* Сетка */}
+        <svg className="absolute inset-0 w-full h-full opacity-[0.06]" xmlns="http://www.w3.org/2000/svg">
           <defs>
             <pattern id="grid3d" width="40" height="40" patternUnits="userSpaceOnUse">
               <path d="M 40 0 L 0 0 0 40" fill="none" stroke="#06b6d4" strokeWidth="0.5" />
@@ -1746,89 +1892,234 @@ function Scene3DPanel() {
           <rect width="100%" height="100%" fill="url(#grid3d)" />
         </svg>
 
-        <div className="absolute bottom-3 left-1/2 -translate-x-1/2 font-display text-[9px] tracking-[0.3em] text-zinc-700">СЦЕНА</div>
+        {/* Планка ригов (потолочная рейка) */}
+        <div className="absolute top-[14%] left-[5%] right-[5%] h-px bg-zinc-700 opacity-40" />
+        <div className="absolute top-[12%] left-[5%] right-[5%] h-px bg-zinc-600 opacity-20" />
 
-        {lights.map(light => {
-          const col = colorHex[light.color];
+        {/* Сцена (пол) */}
+        <div className="absolute bottom-0 left-0 right-0 h-[30%]"
+          style={{ background: "linear-gradient(to top, rgba(9,9,11,0.9), transparent)", borderTop: "1px solid rgba(63,63,70,0.4)" }} />
+        <div className="absolute bottom-3 left-1/2 -translate-x-1/2 font-display text-[8px] tracking-[0.4em] text-zinc-700 pointer-events-none">СЦЕНА</div>
+
+        {/* Световые лучи на полу (ambient glow) */}
+        {isListening && lights.filter(l => l.active).map(light => {
+          const col = light.liveColor ?? light.color;
+          if (light.intensity < 10) return null;
           return (
-            <div key={light.id}
-              onClick={() => setSelected(light.id === selected ? null : light.id)}
-              className="absolute cursor-pointer group"
-              style={{ left: `${light.x}%`, top: `${light.y}%`, transform: "translate(-50%, -50%)" }}
+            <div key={`floor-${light.id}`}
+              className="absolute pointer-events-none"
+              style={{
+                left: `${light.x}%`,
+                bottom: 0,
+                transform: "translateX(-50%)",
+                width: `${Math.round(light.intensity * 0.6)}px`,
+                height: `${Math.round(light.intensity * 0.25)}%`,
+                background: `radial-gradient(ellipse at top, ${col}22, transparent 70%)`,
+                opacity: energy * 0.7 + 0.2,
+              }}
+            />
+          );
+        })}
+
+        {/* Приборы */}
+        {lights.map(light => {
+          const col = light.liveColor ?? light.color;
+          const isSelected = selected === light.id;
+          const pulseIntensity = isListening && light.active
+            ? light.intensity * (0.6 + trackFeatures.onset_strength * 0.4)
+            : light.intensity;
+          const glowSize = Math.round(pulseIntensity / 5) + (isListening && light.active ? Math.round(trackFeatures.onset_strength * 8) : 0);
+
+          return (
+            <div
+              key={light.id}
+              className="absolute group"
+              style={{
+                left: `${light.x}%`,
+                top:  `${light.y}%`,
+                transform: "translate(-50%, -50%)",
+                zIndex: isSelected ? 20 : 10,
+                cursor: addMode ? "crosshair" : "grab",
+              }}
+              onClick={e => { e.stopPropagation(); if (!addMode) setSelected(light.id === selected ? null : light.id); }}
+              onMouseDown={e => { if (!addMode) handleDragStart(e, light.id); }}
             >
-              {light.active && (
-                <div className="absolute top-3 left-1/2 -translate-x-1/2 pointer-events-none"
+              {/* Световой луч вниз */}
+              {light.active && light.intensity > 5 && light.type !== "hazer" && (
+                <div className="absolute pointer-events-none"
                   style={{
-                    width: `${light.intensity / 3.5}px`,
-                    height: `${light.intensity * 0.7}px`,
-                    background: `linear-gradient(to bottom, ${col}66, transparent)`,
-                    clipPath: "polygon(25% 0%, 75% 0%, 100% 100%, 0% 100%)",
+                    top: "100%",
+                    left: "50%",
+                    transform: "translateX(-50%)",
+                    width: light.type === "moving" ? `${Math.round(pulseIntensity / 4)}px` : `${Math.round(pulseIntensity / 3)}px`,
+                    height: light.type === "strobe"
+                      ? `${Math.round(pulseIntensity * (isListening ? 0.8 + trackFeatures.onset_strength * 0.5 : 0.6))}px`
+                      : `${Math.round(pulseIntensity * 0.55)}px`,
+                    background: `linear-gradient(to bottom, ${col}${light.type === "strobe" ? "cc" : "88"}, transparent)`,
+                    clipPath: light.type === "moving"
+                      ? "polygon(35% 0%, 65% 0%, 100% 100%, 0% 100%)"
+                      : "polygon(20% 0%, 80% 0%, 100% 100%, 0% 100%)",
+                    opacity: isListening ? 0.5 + trackFeatures.onset_strength * 0.5 : 0.4,
+                    transition: "opacity 50ms, width 80ms, height 80ms",
                   }}
                 />
               )}
+
+              {/* Сам прибор */}
               <div
-                className="w-4 h-4 rounded-sm border relative z-10 transition-transform"
+                className="relative z-10 flex items-center justify-center transition-all"
                 style={{
-                  background: light.active ? `${col}33` : "#18181b",
-                  borderColor: light.active ? col : "#27272a",
-                  boxShadow: light.active ? `0 0 ${Math.floor(light.intensity / 8)}px ${col}` : "none",
-                  transform: selected === light.id ? "scale(1.3)" : "scale(1)",
+                  width:  light.type === "moving" ? 20 : light.type === "strobe" ? 22 : 16,
+                  height: light.type === "moving" ? 20 : light.type === "strobe" ? 18 : 16,
+                  borderRadius: light.type === "par" || light.type === "wash" ? "50%" : "3px",
+                  background: light.active ? `${col}25` : "#18181b",
+                  border: `1.5px solid ${light.active ? col : "#27272a"}`,
+                  boxShadow: light.active
+                    ? `0 0 ${glowSize}px ${col}, 0 0 ${glowSize * 2}px ${col}44`
+                    : "none",
+                  transform: isSelected ? "scale(1.35)" : "scale(1)",
+                  transition: "box-shadow 80ms, transform 150ms, background 80ms",
                 }}
-              />
-              <div className="absolute top-5 left-1/2 -translate-x-1/2 opacity-0 group-hover:opacity-100 transition-opacity whitespace-nowrap pointer-events-none">
-                <span className="font-mono-tech text-[8px] text-zinc-500 bg-black/90 px-1 py-0.5 rounded">{light.name}</span>
+              >
+                <FixtureIcon type={light.type} color={light.active ? col : "#52525b"} size={9} />
+              </div>
+
+              {/* Лейбл при hover */}
+              <div className="absolute top-6 left-1/2 -translate-x-1/2 opacity-0 group-hover:opacity-100 transition-opacity whitespace-nowrap pointer-events-none z-30">
+                <div className="font-mono-tech text-[8px] text-zinc-300 bg-black/95 border border-zinc-700 px-1.5 py-0.5 rounded flex items-center gap-1">
+                  <span>{light.name}</span>
+                  {light.active && isListening && (
+                    <span style={{ color: col }}>{Math.round(pulseIntensity)}%</span>
+                  )}
+                </div>
               </div>
             </div>
           );
         })}
+
+        {/* Подсказка режима добавления */}
+        {addMode && (
+          <div className="absolute inset-0 flex items-center justify-center pointer-events-none">
+            <div className="bg-black/80 border border-cyan-500/30 rounded px-4 py-2 text-center">
+              <div className="font-display text-[9px] tracking-widest text-cyan-400 mb-0.5">
+                КЛИКНИ ДЛЯ РАЗМЕЩЕНИЯ
+              </div>
+              <div className="font-mono-tech text-[8px] text-zinc-500">
+                {FIXTURE_TYPES.find(f => f.type === addType)?.label}
+                {addName && ` — "${addName}"`}
+              </div>
+            </div>
+          </div>
+        )}
       </div>
 
+      {/* ─── Выбранный прибор ─── */}
       {selectedLight ? (
-        <div className="bg-zinc-900 border rounded p-3 mb-2 animate-fade-in"
-          style={{ borderColor: `${colorHex[selectedLight.color]}44` }}>
-          <div className="flex items-center justify-between mb-3">
-            <span className="font-display text-xs tracking-widest" style={{ color: colorHex[selectedLight.color] }}>
-              {selectedLight.name}
-            </span>
-            <button
-              onClick={() => setLights(prev => prev.map(l => l.id === selectedLight.id ? { ...l, active: !l.active } : l))}
-              className="px-2 py-0.5 text-[10px] font-display tracking-widest border rounded"
-              style={{
-                borderColor: `${colorHex[selectedLight.color]}44`,
-                color: colorHex[selectedLight.color],
-              }}
-            >
-              {selectedLight.active ? "ON" : "OFF"}
-            </button>
+        <div className="bg-zinc-900 border rounded p-2.5"
+          style={{ borderColor: `${selectedLight.liveColor ?? selectedLight.color}33` }}>
+          <div className="flex items-center justify-between mb-2">
+            <div className="flex items-center gap-2">
+              <FixtureIcon type={selectedLight.type} color={selectedLight.liveColor ?? selectedLight.color} size={12} />
+              <span className="font-display text-[10px] tracking-widest"
+                style={{ color: selectedLight.liveColor ?? selectedLight.color }}>
+                {selectedLight.name}
+              </span>
+              <span className="font-display text-[7px] tracking-widest text-zinc-600">
+                {FIXTURE_TYPES.find(f => f.type === selectedLight.type)?.label}
+              </span>
+            </div>
+            <div className="flex items-center gap-1.5">
+              <button
+                onClick={() => setLights(prev => prev.map(l => l.id === selectedLight.id ? { ...l, active: !l.active } : l))}
+                className="px-2 py-0.5 text-[9px] font-display tracking-widest border rounded transition-all"
+                style={{
+                  borderColor: selectedLight.active ? "rgba(34,197,94,0.5)" : "rgba(63,63,70,0.6)",
+                  color: selectedLight.active ? "#22c55e" : "#52525b",
+                  background: selectedLight.active ? "rgba(34,197,94,0.06)" : "transparent",
+                }}
+              >
+                {selectedLight.active ? "ON" : "OFF"}
+              </button>
+              <button
+                onClick={() => deleteLight(selectedLight.id)}
+                className="px-1.5 py-0.5 text-[9px] font-display border border-red-900/50 text-red-600 rounded hover:bg-red-900/20 transition-all"
+              >
+                <Icon name="Trash2" size={10} />
+              </button>
+            </div>
           </div>
+
+          {/* Интенсивность */}
           <div className="flex justify-between mb-1">
-            <span className="font-display text-[9px] tracking-widest text-zinc-500">ИНТЕНСИВНОСТЬ</span>
-            <span className="font-mono-tech text-[10px]" style={{ color: colorHex[selectedLight.color] }}>{selectedLight.intensity}%</span>
+            <span className="font-display text-[8px] tracking-widest text-zinc-600">ЯРКОСТЬ</span>
+            <span className="font-mono-tech text-[9px]"
+              style={{ color: selectedLight.liveColor ?? selectedLight.color }}>
+              {selectedLight.intensity}%
+            </span>
           </div>
           <input type="range" min={0} max={100} value={selectedLight.intensity}
-            onChange={e => setLights(prev => prev.map(l => l.id === selectedLight.id ? { ...l, intensity: +e.target.value } : l))}
-            className="w-full h-1 appearance-none bg-zinc-800 rounded cursor-pointer"
-            style={{ accentColor: colorHex[selectedLight.color] }}
+            onChange={e => setLights(prev => prev.map(l =>
+              l.id === selectedLight.id ? { ...l, intensity: +e.target.value, active: +e.target.value > 0 } : l
+            ))}
+            className="w-full h-1 appearance-none bg-zinc-800 rounded cursor-pointer mb-2"
+            style={{ accentColor: selectedLight.liveColor ?? selectedLight.color }}
           />
+
+          {/* Ручной выбор цвета */}
+          <div className="flex items-center gap-2">
+            <span className="font-display text-[8px] tracking-widest text-zinc-600">ЦВЕТ</span>
+            <input
+              type="color"
+              value={selectedLight.color}
+              onChange={e => setLights(prev => prev.map(l =>
+                l.id === selectedLight.id ? { ...l, color: e.target.value, liveColor: undefined } : l
+              ))}
+              className="w-6 h-6 rounded cursor-pointer border-0 bg-transparent"
+              title="Цвет прибора (ручной)"
+            />
+            {selectedLight.liveColor && (
+              <span className="font-mono-tech text-[7px] text-green-500">← live</span>
+            )}
+            <span className="font-mono-tech text-[8px] text-zinc-600 ml-auto">
+              {selectedLight.x}% / {selectedLight.y}%
+            </span>
+          </div>
         </div>
       ) : (
-        <div className="bg-zinc-900 border border-zinc-800 rounded p-3 text-center mb-2">
-          <span className="font-display text-[10px] tracking-widest text-zinc-600">Выберите прибор на сцене</span>
+        <div className="bg-zinc-900 border border-zinc-800 rounded p-2.5 text-center">
+          <span className="font-display text-[9px] tracking-widest text-zinc-600">
+            {addMode ? "Кликни на сцену для размещения прибора" : "Кликни на прибор для настройки · Зажми для перемещения"}
+          </span>
         </div>
       )}
 
-      <div className="grid grid-cols-2 gap-1.5 max-h-24 overflow-y-auto">
-        {lights.map(l => (
-          <div key={l.id}
-            onClick={() => setSelected(l.id === selected ? null : l.id)}
-            className="flex items-center gap-2 px-2 py-1 border border-zinc-800 rounded cursor-pointer hover:bg-zinc-900 transition-all"
-          >
-            <div className="w-2 h-2 rounded-full shrink-0"
-              style={{ background: l.active ? colorHex[l.color] : "#27272a", boxShadow: l.active ? `0 0 4px ${colorHex[l.color]}` : "none" }}
-            />
-            <span className="font-mono-tech text-[9px] text-zinc-500 truncate">{l.name}</span>
-          </div>
-        ))}
+      {/* ─── Список приборов ─── */}
+      <div className="grid grid-cols-2 gap-1">
+        {lights.map(l => {
+          const col = l.liveColor ?? l.color;
+          return (
+            <div key={l.id}
+              onClick={() => setSelected(l.id === selected ? null : l.id)}
+              className="flex items-center gap-2 px-2 py-1 border rounded cursor-pointer transition-all"
+              style={{
+                borderColor: selected === l.id ? `${col}55` : "rgba(39,39,42,0.8)",
+                background: selected === l.id ? `${col}0a` : "transparent",
+              }}
+            >
+              <div className="w-2 h-2 rounded-full shrink-0 transition-all"
+                style={{
+                  background: l.active ? col : "#27272a",
+                  boxShadow: l.active && isListening ? `0 0 ${4 + Math.round(trackFeatures.onset_strength * 4)}px ${col}` : l.active ? `0 0 3px ${col}` : "none",
+                }}
+              />
+              <FixtureIcon type={l.type} color={l.active ? col : "#52525b"} size={9} />
+              <span className="font-mono-tech text-[8px] text-zinc-500 truncate flex-1">{l.name}</span>
+              {l.active && isListening && (
+                <span className="font-mono-tech text-[7px]" style={{ color: col }}>{l.intensity}%</span>
+              )}
+            </div>
+          );
+        })}
       </div>
     </div>
   );

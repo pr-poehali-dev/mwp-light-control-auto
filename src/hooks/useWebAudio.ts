@@ -131,41 +131,70 @@ const SHAZAM_SAMPLE_MS  = 5_000;
 const SHAZAM_RATE       = 16_000;
 const SHAZAM_FIRST_WAIT = 8_000;
 
-// ─── BPM через медианный peak-detection ──────────────────────────────────────
+// ─── BPM: суббасовый onset detection + IBI кластеризация ──────────────────────
+// Работает на суббасовом буфере (50-120 Hz) — там живёт kick-drum.
+// Inter-beat intervals кластеризуются: берём наиболее плотный кластер.
 
-function detectBPM(energyHistory: number[], fps: number): number {
-  if (energyHistory.length < 30) return 0;
+function detectBPM(bassHistory: number[], fps: number): number {
+  if (bassHistory.length < 40) return 0;
 
-  const mean = energyHistory.reduce((a, b) => a + b, 0) / energyHistory.length;
-  const threshold = mean * 1.35;
-  const minGap = Math.floor(fps * 0.25); // ≥250ms между ударами
+  // Адаптивный порог: скользящее среднее + 1.5σ
+  const n = bassHistory.length;
+  const mean = bassHistory.reduce((a, b) => a + b, 0) / n;
+  const variance = bassHistory.reduce((a, b) => a + (b - mean) ** 2, 0) / n;
+  const sigma = Math.sqrt(variance);
+  const threshold = mean + sigma * 1.2;  // более точный порог
+
+  // Минимальный интервал между ударами: 250ms (= 240 BPM max)
+  const minGap = Math.max(3, Math.floor(fps * 0.25));
 
   const beats: number[] = [];
   let lastBeat = -minGap;
+  let lastVal = 0;
 
-  for (let i = 1; i < energyHistory.length; i++) {
-    if (
-      energyHistory[i] > threshold &&
-      energyHistory[i - 1] <= threshold &&
-      i - lastBeat >= minGap
-    ) {
+  for (let i = 1; i < n; i++) {
+    const v = bassHistory[i];
+    // Восходящий фронт выше порога (positive edge only)
+    if (v > threshold && lastVal <= threshold && i - lastBeat >= minGap) {
       beats.push(i);
       lastBeat = i;
     }
+    lastVal = v;
   }
 
-  if (beats.length < 3) return 0;
+  if (beats.length < 4) return 0;
 
-  const intervals: number[] = [];
-  for (let i = 1; i < beats.length; i++) intervals.push(beats[i] - beats[i - 1]);
+  // Вычисляем IBI (inter-beat intervals) в фреймах
+  const ibis: number[] = [];
+  for (let i = 1; i < beats.length; i++) ibis.push(beats[i] - beats[i - 1]);
 
-  // Медиана вместо среднего — устойчива к выбросам
-  const sorted = [...intervals].sort((a, b) => a - b);
-  const median = sorted[Math.floor(sorted.length / 2)];
-  if (median <= 0) return 0;
+  // Кластеризация IBI: ищем самый плотный кластер (±15% допуск)
+  // Это устраняет случайные двойные удары и пропуски
+  const tolerance = 0.15;
+  let bestCluster: number[] = [];
 
-  const bpm = Math.round((fps * 60) / median);
-  return Math.min(200, Math.max(55, bpm));
+  for (const ibi of ibis) {
+    const cluster = ibis.filter(x => Math.abs(x - ibi) / ibi < tolerance);
+    if (cluster.length > bestCluster.length) bestCluster = cluster;
+  }
+
+  if (bestCluster.length < 2) {
+    // Запасной вариант: медиана всех IBI
+    const sorted = [...ibis].sort((a, b) => a - b);
+    bestCluster = [sorted[Math.floor(sorted.length / 2)]];
+  }
+
+  const avgIBI = bestCluster.reduce((a, b) => a + b, 0) / bestCluster.length;
+  if (avgIBI <= 0) return 0;
+
+  // Конвертируем фреймы → BPM
+  let bpm = Math.round((fps * 60) / avgIBI);
+
+  // Нормализуем в диапазон 60-180: умножаем/делим на 2 если нужно
+  while (bpm < 60  && bpm > 0) bpm *= 2;
+  while (bpm > 180)             bpm = Math.round(bpm / 2);
+
+  return Math.min(180, Math.max(60, bpm));
 }
 
 // ─── Spectral flux ────────────────────────────────────────────────────────────
@@ -377,6 +406,7 @@ export function useWebAudio() {
   const rafRef       = useRef<number>(0);
 
   const energyHistRef  = useRef<number[]>([]);
+  const bassHistRef    = useRef<number[]>([]);   // суббас 50-120 Hz для точного BPM
   const energyLongRef  = useRef<number[]>([]);
   const trendWinRef    = useRef<number[]>([]);
   const fluxHistRef    = useRef<number[]>([]);
@@ -559,6 +589,15 @@ export function useWebAudio() {
         const raw   = lowE * 0.50 + midE * 0.35 + highE * 0.15;
         const disp  = Math.min(1, raw * 2.6);
 
+        // Суббасовый буфер для BPM (50-120 Hz — kick drum)
+        const kickBinStart = Math.floor(50  / binHz);
+        const kickBinEnd   = Math.floor(120 / binHz);
+        let kickSum2 = 0;
+        for (let i = kickBinStart; i < Math.min(kickBinEnd, binCount); i++) kickSum2 += freqData[i];
+        const kickEnergy = kickSum2 / Math.max(1, (kickBinEnd - kickBinStart) * 255);
+        bassHistRef.current.push(kickEnergy);
+        if (bassHistRef.current.length > 240) bassHistRef.current.shift(); // ~4 сек буфер
+
         energyHistRef.current.push(raw);
         if (energyHistRef.current.length > 180) energyHistRef.current.shift();
         energyLongRef.current.push(disp);
@@ -588,13 +627,18 @@ export function useWebAudio() {
             trendRef.current = d > 0.04 ? "rising" : d < -0.04 ? "falling" : "stable";
           }
 
-          // BPM
-          const bpm = detectBPM(energyHistRef.current, fpsRef.current);
+          // BPM — используем суббасовый буфер (kick drum), не общую энергию
+          const bpm = detectBPM(bassHistRef.current, fpsRef.current);
           if (bpm > 0) bpmRawRef.current = bpm;
           if (bpmRawRef.current > 0) {
-            bpmSmthRef.current = bpmSmthRef.current === 0
-              ? bpmRawRef.current
-              : Math.round(bpmSmthRef.current * 0.72 + bpmRawRef.current * 0.28);
+            // Сглаживание: если новый BPM близок к текущему (±10%) — плавно обновляем
+            // Если сильно отличается — быстро обновляем (смена трека)
+            const prev = bpmSmthRef.current;
+            const diff = prev > 0 ? Math.abs(bpm - prev) / prev : 1;
+            const alpha = diff > 0.10 ? 0.6 : 0.18; // быстро при большом скачке
+            bpmSmthRef.current = prev === 0
+              ? bpm
+              : Math.round(prev * (1 - alpha) + bpm * alpha);
           }
 
           // Структура
