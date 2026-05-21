@@ -3,7 +3,7 @@ import Icon from "@/components/ui/icon";
 import { useWebAudio } from "@/hooks/useWebAudio";
 import type { MoodType, TrackStructure } from "@/hooks/useWebAudio";
 import { generateScene, getDefaultSceneFixtures } from "@/hooks/useSceneEngine";
-import type { GeneratedScene, FixtureInScene } from "@/hooks/useSceneEngine";
+import type { GeneratedScene, FixtureInScene, EventType, VenueSize, ShowPolicy, DirectorMode } from "@/hooks/useSceneEngine";
 import { presetsApi, historyApi, settingsApi, artnetApi, type ApiPreset, type ApiEvent, type ApiSettings } from "@/lib/api";
 
 // ─── Types ───────────────────────────────────────────────────────────────────
@@ -1125,26 +1125,56 @@ const STRUCTURE_COLORS: Record<TrackStructure, string> = {
   unknown:    "#52525b",
 };
 
+const RISK_COLORS = { low: "#22c55e", medium: "#f59e0b", high: "#ef4444" };
+const ROLE_LABELS: Record<string, string> = {
+  support: "ПОДДЕРЖКА", accent: "АКЦЕНТ", build: "НАГНЕТАНИЕ",
+  release: "РАЗРЯДКА", reset: "СБРОС",
+};
+const PHASE_LABELS: Record<string, string> = {
+  exposition: "ЭКСПОЗИЦИЯ", development: "РАЗВИТИЕ", tension: "НАПРЯЖЕНИЕ",
+  climax: "КУЛЬМИНАЦИЯ", release: "РАЗРЯДКА", resolution: "ЗАВЕРШЕНИЕ",
+};
+
 function AutoScenePanel() {
   const { analysis, start, stop } = useWebAudio();
-  const { mood, structure, structureProgress, energyTrend, bpm, energy, genre, isListening, error } = analysis;
+  const { mood, structure, structureProgress, energyTrend, bpm, energy, genre, trackFeatures, isListening, error } = analysis;
+
+  // ─── Director parameters ──
+  const [eventType, setEventType] = useState<EventType>("club");
+  const [venueSize, setVenueSize] = useState<VenueSize>("medium");
+  const [showPolicy, setShowPolicy] = useState<ShowPolicy>("balanced");
+  const [directorMode, setDirectorMode] = useState<DirectorMode>("auto");
+  const [artistStyle, setArtistStyle] = useState("Electronic / Club");
+  const [crowdLevel, setCrowdLevel] = useState(0.6);
+  const [settingsOpen, setSettingsOpen] = useState(false);
 
   const [autoSend, setAutoSend] = useState(false);
   const [fixtures, setFixtures] = useState<FixtureInScene[]>(getDefaultSceneFixtures);
   const [scene, setScene] = useState<GeneratedScene | null>(null);
   const [sending, setSending] = useState(false);
   const [lastSent, setLastSent] = useState<string | null>(null);
-  const [sendInterval, setSendInterval] = useState(2000); // ms между авто-отправками
+  const [sendInterval, setSendInterval] = useState(2000);
 
   const lastSceneKeyRef = useRef<string>("");
   const autoSendTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
-  // Генерируем сцену при изменении анализа
+  const directorOptions = {
+    event_type: eventType,
+    venue_size: venueSize,
+    show_policy: showPolicy,
+    mode: directorMode,
+    artist_style: artistStyle,
+    crowd_level: crowdLevel,
+    current_scene: scene?.name ?? "none",
+  };
+
+  // Генерируем сцену через AI-режиссёра
   useEffect(() => {
     if (!isListening) return;
-    const newScene = generateScene(analysis, fixtures);
+    const newScene = generateScene(analysis, fixtures, directorOptions);
     setScene(newScene);
-  }, [analysis, fixtures, isListening]);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [analysis, fixtures, eventType, venueSize, showPolicy, directorMode, artistStyle, crowdLevel, isListening]);
 
   // Авто-отправка DMX
   useEffect(() => {
@@ -1161,9 +1191,10 @@ function AutoScenePanel() {
         setLastSent(new Date().toLocaleTimeString("ru-RU"));
         if (key !== lastSceneKeyRef.current) {
           lastSceneKeyRef.current = key;
+          const ds = scene.directorScene;
           await historyApi.add("ai",
-            `AutoScene: ${scene.name} · ${scene.description}`,
-            { mood: scene.mood, structure: scene.structure, bpm }
+            `[AI Director] ${scene.name} · ${ds.analysis.dramaturgy_phase} · confidence ${Math.round(ds.confidence * 100)}%`,
+            { mood: scene.mood, structure: scene.structure, bpm, phase: ds.analysis.dramaturgy_phase, risk: ds.analysis.risk_level }
           );
         }
       }
@@ -1183,8 +1214,8 @@ function AutoScenePanel() {
     if (res.ok) {
       setLastSent(new Date().toLocaleTimeString("ru-RU"));
       await historyApi.add("manual",
-        `Ручная отправка сцены: ${scene.name}`,
-        { mood: scene.mood, structure: scene.structure }
+        `Ручная отправка: ${scene.name}`,
+        { mood: scene.mood, structure: scene.structure, policy: showPolicy }
       );
     }
     setSending(false);
@@ -1192,27 +1223,33 @@ function AutoScenePanel() {
 
   const moodColor = MOOD_COLORS[mood] || "#52525b";
   const structureColor = STRUCTURE_COLORS[structure] || "#52525b";
+  const ds = scene?.directorScene;
 
   return (
-    <div className="h-full flex flex-col gap-3 overflow-y-auto">
-      <PanelHeader title="Auto Scene" icon="Sparkles" accent="#a855f7" />
+    <div className="h-full flex flex-col gap-2.5 overflow-y-auto pr-0.5">
+      <PanelHeader title="AI Director" icon="Sparkles" accent="#a855f7" />
 
-      {/* Статус микрофона */}
-      <div className="flex items-center gap-3 p-3 bg-zinc-900 border rounded"
+      {/* ─── Статус + управление микрофоном ─── */}
+      <div className="flex items-center gap-3 p-2.5 bg-zinc-900 border rounded"
         style={{ borderColor: isListening ? "rgba(168,85,247,0.4)" : "rgba(63,63,70,0.8)" }}>
         <div className={`w-2 h-2 rounded-full shrink-0 ${isListening ? "bg-green-400 animate-pulse" : "bg-zinc-600"}`} />
-        <span className="font-display text-[10px] tracking-widest text-zinc-500 flex-1">
-          {isListening ? "СЛУШАЮ МУЗЫКУ" : "МИК ОТКЛЮЧЁН"}
-        </span>
-        <button
-          onClick={isListening ? stop : start}
+        <div className="flex-1">
+          <div className="font-display text-[10px] tracking-widest text-zinc-500">
+            {isListening ? "AI DIRECTOR · ACTIVE" : "AI DIRECTOR · STANDBY"}
+          </div>
+          {isListening && ds && (
+            <div className="font-mono-tech text-[9px] text-zinc-600 mt-0.5">
+              confidence {Math.round(ds.confidence * 100)}% · {ds.analysis.dominant_signal.replace(/_/g, " ")}
+            </div>
+          )}
+        </div>
+        <button onClick={isListening ? stop : start}
           className="px-3 py-1 text-[10px] font-display tracking-widest border rounded transition-all"
           style={{
             borderColor: isListening ? "rgba(239,68,68,0.5)" : "rgba(34,197,94,0.5)",
             color: isListening ? "#ef4444" : "#22c55e",
             background: isListening ? "rgba(239,68,68,0.08)" : "rgba(34,197,94,0.08)",
-          }}
-        >
+          }}>
           {isListening ? "■ СТОП" : "▶ СЛУШАТЬ"}
         </button>
       </div>
@@ -1223,69 +1260,162 @@ function AutoScenePanel() {
         </div>
       )}
 
-      {/* Анализ музыки — текущее состояние */}
+      {/* ─── Музыкальный анализ ─── */}
       <div className="grid grid-cols-2 gap-2">
-        {/* Настроение */}
-        <div className="p-3 bg-zinc-900 border rounded flex flex-col gap-1"
+        <div className="p-2.5 bg-zinc-900 border rounded flex flex-col gap-1"
           style={{ borderColor: `${moodColor}33` }}>
           <span className="font-display text-[9px] tracking-widest text-zinc-500">НАСТРОЕНИЕ</span>
-          <span className="font-mono-tech text-sm font-bold" style={{ color: moodColor }}>
-            {MOOD_LABELS[mood] || mood}
-          </span>
-          <div className="h-1 bg-zinc-800 rounded-full overflow-hidden mt-1">
+          <span className="font-mono-tech text-sm font-bold" style={{ color: moodColor }}>{MOOD_LABELS[mood] || mood}</span>
+          <div className="h-0.5 bg-zinc-800 rounded-full overflow-hidden">
             <div className="h-full rounded-full transition-all duration-300"
-              style={{ width: `${energy * 100}%`, background: moodColor, boxShadow: `0 0 6px ${moodColor}88` }} />
+              style={{ width: `${energy * 100}%`, background: moodColor }} />
           </div>
         </div>
-
-        {/* Структура трека */}
-        <div className="p-3 bg-zinc-900 border rounded flex flex-col gap-1"
+        <div className="p-2.5 bg-zinc-900 border rounded flex flex-col gap-1"
           style={{ borderColor: `${structureColor}33` }}>
-          <span className="font-display text-[9px] tracking-widest text-zinc-500">СТРУКТУРА ТРЕКА</span>
-          <span className="font-mono-tech text-sm font-bold" style={{ color: structureColor }}>
-            {STRUCTURE_LABELS[structure] || structure}
-          </span>
-          <div className="h-1 bg-zinc-800 rounded-full overflow-hidden mt-1">
+          <span className="font-display text-[9px] tracking-widest text-zinc-500">СТРУКТУРА</span>
+          <span className="font-mono-tech text-sm font-bold" style={{ color: structureColor }}>{STRUCTURE_LABELS[structure] || structure}</span>
+          <div className="h-0.5 bg-zinc-800 rounded-full overflow-hidden">
             <div className="h-full rounded-full transition-all duration-500"
-              style={{ width: `${structureProgress * 100}%`, background: structureColor, boxShadow: `0 0 6px ${structureColor}88` }} />
+              style={{ width: `${structureProgress * 100}%`, background: structureColor }} />
           </div>
         </div>
       </div>
 
-      {/* Мини-статистика */}
-      <div className="grid grid-cols-4 gap-1.5">
+      {/* ─── Музыкальные параметры ─── */}
+      <div className="grid grid-cols-4 gap-1">
         {[
-          { label: "BPM",    value: bpm > 0 ? String(bpm) : "—",   color: "#f59e0b" },
-          { label: "ЖАНР",   value: genre,                           color: "#06b6d4" },
+          { label: "BPM",     value: bpm > 0 ? String(bpm) : "—", color: "#f59e0b" },
+          { label: "ЖАНР",    value: genre,                         color: "#06b6d4" },
           { label: "ЭНЕРГИЯ", value: `${Math.round(energy * 100)}%`, color: "#22c55e" },
-          { label: "ТРЕНД",  value: energyTrend === "rising" ? "↑" : energyTrend === "falling" ? "↓" : "→", color: "#a855f7" },
+          { label: "ТРЕНД",   value: energyTrend === "rising" ? "↑ РОСТ" : energyTrend === "falling" ? "↓ СПАД" : "→ СТАБ", color: "#a855f7" },
         ].map(({ label, value, color }) => (
-          <div key={label} className="bg-zinc-900 border border-zinc-800 p-2 rounded text-center">
+          <div key={label} className="bg-zinc-900 border border-zinc-800 p-1.5 rounded text-center">
             <div className="font-display text-[8px] tracking-widest text-zinc-600 mb-0.5">{label}</div>
-            <div className="font-mono-tech text-xs" style={{ color }}>{value}</div>
+            <div className="font-mono-tech text-[10px]" style={{ color }}>{value}</div>
           </div>
         ))}
       </div>
 
-      {/* Текущая сцена */}
+      {/* ─── Track Features ─── */}
+      {isListening && (
+        <div className="p-2.5 bg-zinc-900 border border-zinc-800 rounded">
+          <div className="font-display text-[9px] tracking-widest text-zinc-600 mb-2">TRACK FEATURES</div>
+          <div className="grid grid-cols-2 gap-x-3 gap-y-1">
+            {[
+              { label: "KICK",     value: trackFeatures.kick_density,     color: "#ef4444" },
+              { label: "BASS",     value: trackFeatures.bass_energy,      color: "#3b82f6" },
+              { label: "SNARE",    value: trackFeatures.snare_density,    color: "#f97316" },
+              { label: "VOCAL",    value: trackFeatures.vocal_presence,   color: "#22c55e" },
+              { label: "BRIGHT",   value: trackFeatures.spectral_brightness, color: "#06b6d4" },
+              { label: "DROP %",   value: trackFeatures.drop_probability, color: "#a855f7" },
+            ].map(({ label, value, color }) => (
+              <div key={label} className="flex items-center gap-2">
+                <span className="font-display text-[8px] tracking-widest text-zinc-600 w-10">{label}</span>
+                <div className="flex-1 h-1 bg-zinc-800 rounded-full overflow-hidden">
+                  <div className="h-full rounded-full transition-all duration-200"
+                    style={{ width: `${value * 100}%`, background: color }} />
+                </div>
+                <span className="font-mono-tech text-[8px] w-6 text-right" style={{ color }}>{Math.round(value * 100)}</span>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {/* ─── AI Director Analysis ─── */}
+      {ds && isListening && (
+        <div className="p-2.5 bg-zinc-900 border rounded" style={{ borderColor: "rgba(168,85,247,0.25)" }}>
+          <div className="font-display text-[9px] tracking-widest text-purple-400 mb-2">ДРАМАТУРГИЯ</div>
+          <div className="grid grid-cols-3 gap-1.5 mb-2">
+            <div className="bg-zinc-800/60 p-1.5 rounded text-center">
+              <div className="font-display text-[8px] tracking-widest text-zinc-600">ФАЗА</div>
+              <div className="font-mono-tech text-[9px] text-purple-300 mt-0.5">
+                {PHASE_LABELS[ds.analysis.dramaturgy_phase] || ds.analysis.dramaturgy_phase}
+              </div>
+            </div>
+            <div className="bg-zinc-800/60 p-1.5 rounded text-center">
+              <div className="font-display text-[8px] tracking-widest text-zinc-600">РОЛЬ</div>
+              <div className="font-mono-tech text-[9px] text-cyan-300 mt-0.5">
+                {ROLE_LABELS[ds.analysis.lighting_role] || ds.analysis.lighting_role}
+              </div>
+            </div>
+            <div className="bg-zinc-800/60 p-1.5 rounded text-center">
+              <div className="font-display text-[8px] tracking-widest text-zinc-600">РИСК</div>
+              <div className="font-mono-tech text-[9px] mt-0.5"
+                style={{ color: RISK_COLORS[ds.analysis.risk_level] }}>
+                {ds.analysis.risk_level.toUpperCase()}
+              </div>
+            </div>
+          </div>
+          {/* Цветовая палитра */}
+          <div className="flex items-center gap-2 mb-1.5">
+            <span className="font-display text-[8px] tracking-widest text-zinc-600">ПАЛИТРА</span>
+            <div className="flex gap-1">
+              {ds.parameters.color_palette.slice(0, 6).map((c, i) => (
+                <div key={i} className="w-4 h-4 rounded border border-zinc-700"
+                  style={{ background: c, boxShadow: `0 0 4px ${c}88` }} />
+              ))}
+            </div>
+          </div>
+          {/* Параметры */}
+          <div className="grid grid-cols-3 gap-1">
+            {[
+              { label: "ДВИЖЕНИЕ", value: ds.parameters.movement.toUpperCase() },
+              { label: "ТУМАН",    value: ds.parameters.fog.toUpperCase() },
+              { label: "СТРОБ",    value: ds.parameters.strobe ? "ON" : "OFF" },
+              { label: "ПЛОТНОСТЬ", value: ds.parameters.visual_density.toUpperCase() },
+              { label: "ЛУЧ",     value: ds.parameters.beam_width.toUpperCase() },
+              { label: "BPM SYNC", value: ds.parameters.tempo_sync ? "ON" : "OFF" },
+            ].map(({ label, value }) => (
+              <div key={label} className="text-center">
+                <div className="font-display text-[7px] tracking-widest text-zinc-600">{label}</div>
+                <div className="font-mono-tech text-[9px] text-zinc-300">{value}</div>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {/* ─── Активная сцена + приборы ─── */}
       {scene && isListening ? (
-        <div className="p-3 bg-zinc-900 border rounded" style={{ borderColor: "rgba(168,85,247,0.3)" }}>
-          <div className="flex items-center justify-between mb-2">
+        <div className="p-2.5 bg-zinc-900 border rounded" style={{ borderColor: "rgba(168,85,247,0.3)" }}>
+          <div className="flex items-center justify-between mb-1.5">
             <span className="font-display text-[9px] tracking-widest text-purple-400">АКТИВНАЯ СЦЕНА</span>
-            {sending && <span className="font-mono-tech text-[9px] text-amber-400 animate-pulse">ОТПРАВКА...</span>}
+            {sending && <span className="font-mono-tech text-[9px] text-amber-400 animate-pulse">TX...</span>}
             {lastSent && !sending && <span className="font-mono-tech text-[9px] text-green-500">✓ {lastSent}</span>}
           </div>
-          <div className="font-mono-tech text-base font-bold text-white mb-0.5">{scene.name}</div>
-          <div className="font-body text-[11px] text-zinc-500 mb-3">{scene.description}</div>
+          <div className="font-mono-tech text-sm font-bold text-white mb-0.5">{scene.name}</div>
+          <div className="font-body text-[10px] text-zinc-500 mb-2 leading-snug">{scene.description}</div>
 
-          {/* Приборы сцены */}
-          <div className="space-y-1.5 max-h-40 overflow-y-auto pr-1">
+          {/* Hint оператора */}
+          {ds && (directorMode === "hybrid" || directorMode === "manual_hint") && (
+            <div className="mb-2 px-2 py-1.5 bg-amber-950/30 border border-amber-500/20 rounded">
+              <span className="font-mono-tech text-[9px] text-amber-400">
+                ⚡ {ds.safety.manual_override_hint}
+              </span>
+            </div>
+          )}
+
+          {/* Safety restrictions */}
+          {ds && ds.safety.restrictions_applied.length > 0 && (
+            <div className="flex flex-wrap gap-1 mb-2">
+              {ds.safety.restrictions_applied.map(r => (
+                <span key={r} className="font-display text-[7px] tracking-widest px-1.5 py-0.5 bg-zinc-800 text-zinc-500 rounded">
+                  {r.replace(/_/g, " ")}
+                </span>
+              ))}
+            </div>
+          )}
+
+          {/* Приборы */}
+          <div className="space-y-1 max-h-32 overflow-y-auto pr-0.5">
             {scene.fixtureStates.map(fs => (
               <div key={fs.fixtureId} className="flex items-center gap-2 px-2 py-1 bg-zinc-800/60 rounded">
-                <div className="w-3 h-3 rounded-full shrink-0 border border-zinc-600"
-                  style={{ background: fs.color, boxShadow: `0 0 6px ${fs.color}88` }} />
+                <div className="w-2.5 h-2.5 rounded-full shrink-0"
+                  style={{ background: fs.color, boxShadow: `0 0 5px ${fs.color}99` }} />
                 <span className="font-mono-tech text-[9px] text-zinc-400 flex-1 truncate">{fs.fixtureName}</span>
-                <span className="font-display text-[8px] tracking-widest text-zinc-600">{fs.fixtureType}</span>
+                <span className="font-display text-[7px] tracking-widest text-zinc-600">{fs.fixtureType}</span>
                 <span className="font-mono-tech text-[9px]" style={{ color: fs.color }}>{fs.intensity}%</span>
               </div>
             ))}
@@ -1294,79 +1424,181 @@ function AutoScenePanel() {
       ) : (
         <div className="p-4 bg-zinc-900 border border-zinc-800 rounded text-center">
           <span className="font-display text-[10px] tracking-widest text-zinc-600">
-            {isListening ? "Генерация сцены..." : "Включите микрофон для анализа"}
+            {isListening ? "Инициализация AI режиссёра..." : "Включите микрофон для запуска AI"}
           </span>
         </div>
       )}
 
-      {/* Управление автоотправкой */}
-      <div className="p-3 bg-zinc-900 border rounded" style={{ borderColor: "rgba(6,182,212,0.25)" }}>
-        <div className="flex items-center justify-between mb-3">
-          <span className="font-display text-xs tracking-widest text-cyan-400">АВТОПИЛОТ DMX</span>
+      {/* ─── Настройки шоу (сворачиваемые) ─── */}
+      <div className="bg-zinc-900 border border-zinc-800 rounded overflow-hidden">
+        <button
+          onClick={() => setSettingsOpen(v => !v)}
+          className="w-full flex items-center justify-between px-3 py-2 hover:bg-zinc-800/50 transition-colors"
+        >
+          <span className="font-display text-[9px] tracking-widest text-zinc-500">ПАРАМЕТРЫ ШОУ</span>
+          <Icon name={settingsOpen ? "ChevronUp" : "ChevronDown"} size={12} style={{ color: "#52525b" }} />
+        </button>
+        {settingsOpen && (
+          <div className="px-3 pb-3 space-y-3 border-t border-zinc-800">
+            {/* Event type */}
+            <div>
+              <div className="font-display text-[9px] tracking-widest text-zinc-600 mb-1.5 mt-2">ТИП СОБЫТИЯ</div>
+              <div className="flex flex-wrap gap-1">
+                {(["club", "festival", "concert", "theatre", "party"] as EventType[]).map(et => (
+                  <button key={et} onClick={() => setEventType(et)}
+                    className="px-2 py-0.5 text-[9px] font-display tracking-widest border rounded transition-all"
+                    style={{
+                      borderColor: eventType === et ? "rgba(168,85,247,0.6)" : "rgba(63,63,70,0.8)",
+                      color: eventType === et ? "#a855f7" : "#52525b",
+                      background: eventType === et ? "rgba(168,85,247,0.1)" : "transparent",
+                    }}>
+                    {et.toUpperCase()}
+                  </button>
+                ))}
+              </div>
+            </div>
+
+            {/* Venue size */}
+            <div>
+              <div className="font-display text-[9px] tracking-widest text-zinc-600 mb-1.5">РАЗМЕР ПЛОЩАДКИ</div>
+              <div className="flex gap-1">
+                {(["small", "medium", "large", "arena"] as VenueSize[]).map(vs => (
+                  <button key={vs} onClick={() => setVenueSize(vs)}
+                    className="flex-1 py-1 text-[9px] font-display tracking-widest border rounded transition-all"
+                    style={{
+                      borderColor: venueSize === vs ? "rgba(6,182,212,0.6)" : "rgba(63,63,70,0.8)",
+                      color: venueSize === vs ? "#06b6d4" : "#52525b",
+                      background: venueSize === vs ? "rgba(6,182,212,0.1)" : "transparent",
+                    }}>
+                    {vs.toUpperCase()}
+                  </button>
+                ))}
+              </div>
+            </div>
+
+            {/* Show policy */}
+            <div>
+              <div className="font-display text-[9px] tracking-widest text-zinc-600 mb-1.5">ШОУ-ПОЛИТИКА</div>
+              <div className="flex flex-wrap gap-1">
+                {(["aggressive", "balanced", "theatrical", "safe"] as ShowPolicy[]).map(sp => {
+                  const policyColors: Record<ShowPolicy, string> = {
+                    aggressive: "#ef4444", balanced: "#22c55e",
+                    theatrical: "#a855f7", safe: "#3b82f6",
+                  };
+                  return (
+                    <button key={sp} onClick={() => setShowPolicy(sp)}
+                      className="px-2 py-0.5 text-[9px] font-display tracking-widest border rounded transition-all"
+                      style={{
+                        borderColor: showPolicy === sp ? `${policyColors[sp]}88` : "rgba(63,63,70,0.8)",
+                        color: showPolicy === sp ? policyColors[sp] : "#52525b",
+                        background: showPolicy === sp ? `${policyColors[sp]}18` : "transparent",
+                      }}>
+                      {sp.toUpperCase()}
+                    </button>
+                  );
+                })}
+              </div>
+            </div>
+
+            {/* Director mode */}
+            <div>
+              <div className="font-display text-[9px] tracking-widest text-zinc-600 mb-1.5">РЕЖИМ РЕЖИССЁРА</div>
+              <div className="flex gap-1">
+                {(["auto", "hybrid", "manual_hint"] as DirectorMode[]).map(dm => (
+                  <button key={dm} onClick={() => setDirectorMode(dm)}
+                    className="flex-1 py-1 text-[9px] font-display tracking-widest border rounded transition-all"
+                    style={{
+                      borderColor: directorMode === dm ? "rgba(245,158,11,0.6)" : "rgba(63,63,70,0.8)",
+                      color: directorMode === dm ? "#f59e0b" : "#52525b",
+                      background: directorMode === dm ? "rgba(245,158,11,0.1)" : "transparent",
+                    }}>
+                    {dm === "auto" ? "АВТО" : dm === "hybrid" ? "ГИБРИД" : "ПОДСКАЗКИ"}
+                  </button>
+                ))}
+              </div>
+            </div>
+
+            {/* Crowd level */}
+            <div>
+              <div className="flex justify-between mb-1">
+                <span className="font-display text-[9px] tracking-widest text-zinc-600">УРОВЕНЬ ЗАЛА</span>
+                <span className="font-mono-tech text-[10px] text-green-400">{Math.round(crowdLevel * 100)}%</span>
+              </div>
+              <input type="range" min={0} max={100} value={Math.round(crowdLevel * 100)}
+                onChange={e => setCrowdLevel(+e.target.value / 100)}
+                className="w-full h-1 appearance-none bg-zinc-800 rounded cursor-pointer"
+                style={{ accentColor: "#22c55e" }}
+              />
+            </div>
+
+            {/* Artist style */}
+            <div>
+              <div className="font-display text-[9px] tracking-widest text-zinc-600 mb-1">СТИЛЬ АРТИСТА</div>
+              <input
+                type="text"
+                value={artistStyle}
+                onChange={e => setArtistStyle(e.target.value)}
+                placeholder="Dark Techno, Melodic House..."
+                className="w-full bg-zinc-800 border border-zinc-700 rounded px-2 py-1 text-[10px] font-mono-tech text-zinc-300 focus:outline-none focus:border-purple-500/50"
+              />
+            </div>
+          </div>
+        )}
+      </div>
+
+      {/* ─── Автопилот DMX ─── */}
+      <div className="p-2.5 bg-zinc-900 border rounded" style={{ borderColor: "rgba(6,182,212,0.25)" }}>
+        <div className="flex items-center justify-between mb-2">
+          <span className="font-display text-[10px] tracking-widest text-cyan-400">АВТОПИЛОТ DMX</span>
           <div className="flex items-center gap-2">
-            <span className="font-mono-tech text-[10px] text-zinc-500">
-              {autoSend ? "ВКЛЮЧЁН" : "ВЫКЛЮЧЕН"}
-            </span>
-            <button
-              onClick={() => setAutoSend(v => !v)}
+            <span className="font-mono-tech text-[9px] text-zinc-600">{sendInterval}ms</span>
+            <button onClick={() => setAutoSend(v => !v)}
               className="px-3 py-1 text-[10px] font-display tracking-widest border rounded transition-all"
               style={{
                 borderColor: autoSend ? "rgba(239,68,68,0.5)" : "rgba(34,197,94,0.5)",
                 color: autoSend ? "#ef4444" : "#22c55e",
                 background: autoSend ? "rgba(239,68,68,0.08)" : "rgba(34,197,94,0.08)",
-              }}
-            >
+              }}>
               {autoSend ? "■ СТОП" : "▶ СТАРТ"}
             </button>
           </div>
         </div>
-
-        {/* Интервал отправки */}
-        <div>
-          <div className="flex justify-between mb-1">
-            <span className="font-display text-[9px] tracking-widest text-zinc-500">ИНТЕРВАЛ ОБНОВЛЕНИЯ</span>
-            <span className="font-mono-tech text-[10px] text-cyan-400">{sendInterval}ms</span>
-          </div>
-          <input type="range" min={500} max={5000} step={500} value={sendInterval}
-            onChange={e => setSendInterval(+e.target.value)}
-            className="w-full h-1 appearance-none bg-zinc-800 rounded cursor-pointer"
-            style={{ accentColor: "#06b6d4" }}
-          />
-        </div>
+        <input type="range" min={500} max={5000} step={500} value={sendInterval}
+          onChange={e => setSendInterval(+e.target.value)}
+          className="w-full h-0.5 appearance-none bg-zinc-800 rounded cursor-pointer"
+          style={{ accentColor: "#06b6d4" }}
+        />
       </div>
 
-      {/* Ручная отправка */}
-      <button
-        onClick={handleManualSend}
-        disabled={sending || !scene || !isListening}
-        className="w-full py-2.5 font-display text-[10px] tracking-widest border rounded transition-all flex items-center justify-center gap-2"
-        style={{
-          borderColor: scene && isListening ? "rgba(168,85,247,0.5)" : "rgba(63,63,70,0.5)",
-          color: scene && isListening ? "#a855f7" : "#52525b",
-          background: scene && isListening ? "rgba(168,85,247,0.08)" : "transparent",
-        }}
-      >
-        <Icon name="Send" size={12} />
-        ОТПРАВИТЬ СЦЕНУ ВРУЧНУЮ
-      </button>
+      {/* ─── Кнопки управления ─── */}
+      <div className="flex gap-2">
+        <button onClick={handleManualSend} disabled={sending || !scene || !isListening}
+          className="flex-1 py-2 font-display text-[10px] tracking-widest border rounded transition-all flex items-center justify-center gap-2"
+          style={{
+            borderColor: scene && isListening ? "rgba(168,85,247,0.5)" : "rgba(63,63,70,0.5)",
+            color: scene && isListening ? "#a855f7" : "#52525b",
+            background: scene && isListening ? "rgba(168,85,247,0.08)" : "transparent",
+          }}>
+          <Icon name="Send" size={11} />
+          ОТПРАВИТЬ СЦЕНУ
+        </button>
+        <button
+          onClick={() => setFixtures(getDefaultSceneFixtures())}
+          className="px-3 py-2 font-display text-[10px] tracking-widest border border-zinc-800 text-zinc-600 hover:text-zinc-400 rounded transition-all"
+          title="Сбросить список приборов">
+          <Icon name="RotateCcw" size={11} />
+        </button>
+      </div>
 
-      {/* Настройка приборов */}
-      <div className="p-3 bg-zinc-900 border border-zinc-800 rounded">
-        <div className="flex items-center justify-between mb-2">
-          <span className="font-display text-[9px] tracking-widest text-zinc-500">ПРИБОРЫ В СЦЕНЕ ({fixtures.length})</span>
-          <button
-            onClick={() => setFixtures(getDefaultSceneFixtures())}
-            className="font-display text-[9px] tracking-widest text-zinc-600 hover:text-zinc-400 transition-colors"
-          >
-            СБРОС
-          </button>
-        </div>
-        <div className="space-y-1 max-h-32 overflow-y-auto">
+      {/* ─── Приборы в сцене ─── */}
+      <div className="p-2.5 bg-zinc-900 border border-zinc-800 rounded">
+        <div className="font-display text-[9px] tracking-widest text-zinc-600 mb-1.5">ПРИБОРЫ ({fixtures.length})</div>
+        <div className="space-y-0.5 max-h-28 overflow-y-auto">
           {fixtures.map((f, idx) => (
-            <div key={f.id} className="flex items-center gap-2 text-[10px]">
-              <span className="font-mono-tech text-zinc-700 w-4">{idx + 1}</span>
-              <span className="font-mono-tech text-zinc-400 flex-1 truncate">{f.name}</span>
-              <span className="font-display tracking-widest text-zinc-600">{f.type}</span>
+            <div key={f.id} className="flex items-center gap-2 text-[9px]">
+              <span className="font-mono-tech text-zinc-700 w-3">{idx + 1}</span>
+              <span className="font-mono-tech text-zinc-500 flex-1 truncate">{f.name}</span>
+              <span className="font-display tracking-widest text-zinc-700">{f.type}</span>
               <span className="font-mono-tech text-zinc-700">CH{f.dmxStartChannel}</span>
             </div>
           ))}
