@@ -25,6 +25,38 @@ function useAudioContext(): AudioContextValue {
   return ctx;
 }
 
+// ─── Director Context — состояние автопилота, живёт вне компонентов ──────────
+// Весь state AutoScenePanel + таймер отправки DMX хранятся здесь,
+// поэтому смена вкладки не прерывает автопилот.
+
+interface DirectorContextValue {
+  // Director options
+  eventType: EventType;      setEventType: (v: EventType) => void;
+  venueSize: VenueSize;      setVenueSize: (v: VenueSize) => void;
+  showPolicy: ShowPolicy;    setShowPolicy: (v: ShowPolicy) => void;
+  directorMode: DirectorMode; setDirectorMode: (v: DirectorMode) => void;
+  artistStyle: string;       setArtistStyle: (v: string) => void;
+  crowdLevel: number;        setCrowdLevel: (v: number) => void;
+  // Fixtures & scene
+  fixtures: FixtureInScene[];    setFixtures: (v: FixtureInScene[]) => void;
+  scene: GeneratedScene | null;
+  // Autopilot
+  autoSend: boolean;         setAutoSend: (v: boolean) => void;
+  sendInterval: number;      setSendInterval: (v: number) => void;
+  sending: boolean;
+  lastSent: string | null;
+  // Actions
+  manualSend: () => Promise<void>;
+}
+
+const DirectorCtx = createContext<DirectorContextValue | null>(null);
+
+function useDirectorContext(): DirectorContextValue {
+  const ctx = useContext(DirectorCtx);
+  if (!ctx) throw new Error("useDirectorContext must be inside DirectorProvider");
+  return ctx;
+}
+
 // ─── Types ───────────────────────────────────────────────────────────────────
 type TabId = "dmx" | "audio" | "library" | "settings" | "history" | "scene3d" | "autoscene";
 
@@ -1160,108 +1192,28 @@ function AutoScenePanel() {
   const { analysis, start, stop, triggerShazam } = useAudioContext();
   const { mood, structure, structureProgress, energyTrend, bpm, energy, genre, trackFeatures, shazam, isListening, error } = analysis;
 
-  // ─── Director parameters ──
-  const [eventType, setEventType] = useState<EventType>("club");
-  const [venueSize, setVenueSize] = useState<VenueSize>("medium");
-  const [showPolicy, setShowPolicy] = useState<ShowPolicy>("balanced");
-  const [directorMode, setDirectorMode] = useState<DirectorMode>("auto");
-  const [artistStyle, setArtistStyle] = useState("Electronic / Club");
-  const [crowdLevel, setCrowdLevel] = useState(0.6);
-  const [settingsOpen, setSettingsOpen] = useState(false);
+  // Весь state и логика автопилота — из контекста (не сбрасывается при смене вкладок)
+  const {
+    eventType, setEventType, venueSize, setVenueSize,
+    showPolicy, setShowPolicy, directorMode, setDirectorMode,
+    artistStyle, setArtistStyle, crowdLevel, setCrowdLevel,
+    fixtures, setFixtures, scene,
+    autoSend, setAutoSend, sendInterval, setSendInterval,
+    sending, lastSent, manualSend,
+  } = useDirectorContext();
 
-  // RapidAPI ключ — хранится в localStorage
-  const [rapidApiKey, setRapidApiKey] = useState<string>(() => localStorage.getItem("rapidapi_key") ?? "");
+  // UI-only состояния (не нужны между вкладками — их ресет не страшен)
+  const [settingsOpen, setSettingsOpen] = useState(false);
+  const [rapidApiKey, setRapidApiKey]   = useState<string>(() => localStorage.getItem("rapidapi_key") ?? "");
   const [keyInputOpen, setKeyInputOpen] = useState(false);
   const saveApiKey = (val: string) => {
     setRapidApiKey(val);
     localStorage.setItem("rapidapi_key", val);
   };
 
-  const [autoSend, setAutoSend] = useState(false);
-  const [fixtures, setFixtures] = useState<FixtureInScene[]>(getDefaultSceneFixtures);
-  const [scene, setScene] = useState<GeneratedScene | null>(null);
-  const [sending, setSending] = useState(false);
-  const [lastSent, setLastSent] = useState<string | null>(null);
-  const [sendInterval, setSendInterval] = useState(2000);
-
-  const lastSceneKeyRef = useRef<string>("");
-  const autoSendTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
-
-  const directorOptions = {
-    event_type: eventType,
-    venue_size: venueSize,
-    show_policy: showPolicy,
-    mode: directorMode,
-    artist_style: artistStyle,
-    crowd_level: crowdLevel,
-    current_scene: scene?.name ?? "none",
-  };
-
-  // Генерируем сцену через AI-режиссёра
-  useEffect(() => {
-    if (!isListening) return;
-    const newScene = generateScene(analysis, fixtures, directorOptions);
-    setScene(newScene);
-    // Прокидываем цвета в 3D-сцену через глобальный объект
-    if (newScene.fixtureStates.length > 0) {
-      const colorMap: Record<string, string> = {};
-      newScene.fixtureStates.forEach((fs, idx) => {
-        colorMap[String(idx)] = fs.color;
-        colorMap[String(fs.fixtureId)] = fs.color;
-      });
-      (window as Record<string, unknown>).__aiSceneColors = colorMap;
-    }
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [analysis, fixtures, eventType, venueSize, showPolicy, directorMode, artistStyle, crowdLevel, isListening]);
-
-  // Авто-отправка DMX
-  useEffect(() => {
-    if (autoSendTimerRef.current) clearInterval(autoSendTimerRef.current);
-    if (!autoSend || !isListening) return;
-
-    autoSendTimerRef.current = setInterval(async () => {
-      if (!scene) return;
-      const key = `${scene.mood}_${scene.structure}`;
-      const channels = scene.dmxValues.slice(0, 16);
-      setSending(true);
-      const res = await artnetApi.send(channels);
-      if (res.ok) {
-        setLastSent(new Date().toLocaleTimeString("ru-RU"));
-        if (key !== lastSceneKeyRef.current) {
-          lastSceneKeyRef.current = key;
-          const ds = scene.directorScene;
-          await historyApi.add("ai",
-            `[AI Director] ${scene.name} · ${ds.analysis.dramaturgy_phase} · confidence ${Math.round(ds.confidence * 100)}%`,
-            { mood: scene.mood, structure: scene.structure, bpm, phase: ds.analysis.dramaturgy_phase, risk: ds.analysis.risk_level }
-          );
-        }
-      }
-      setSending(false);
-    }, sendInterval);
-
-    return () => {
-      if (autoSendTimerRef.current) clearInterval(autoSendTimerRef.current);
-    };
-  }, [autoSend, isListening, scene, sendInterval, bpm]);
-
-  const handleManualSend = async () => {
-    if (!scene) return;
-    setSending(true);
-    const channels = scene.dmxValues.slice(0, 16);
-    const res = await artnetApi.send(channels);
-    if (res.ok) {
-      setLastSent(new Date().toLocaleTimeString("ru-RU"));
-      await historyApi.add("manual",
-        `Ручная отправка: ${scene.name}`,
-        { mood: scene.mood, structure: scene.structure, policy: showPolicy }
-      );
-    }
-    setSending(false);
-  };
-
-  const moodColor = MOOD_COLORS[mood] || "#52525b";
+  const moodColor      = MOOD_COLORS[mood] || "#52525b";
   const structureColor = STRUCTURE_COLORS[structure] || "#52525b";
-  const ds = scene?.directorScene;
+  const ds             = scene?.directorScene;
 
   return (
     <div className="h-full flex flex-col gap-2.5 overflow-y-auto pr-0.5">
@@ -1712,7 +1664,7 @@ function AutoScenePanel() {
 
       {/* ─── Кнопки управления ─── */}
       <div className="flex gap-2">
-        <button onClick={handleManualSend} disabled={sending || !scene || !isListening}
+        <button onClick={manualSend} disabled={sending || !scene || !isListening}
           className="flex-1 py-2 font-display text-[10px] tracking-widest border rounded transition-all flex items-center justify-center gap-2"
           style={{
             borderColor: scene && isListening ? "rgba(168,85,247,0.5)" : "rgba(63,63,70,0.5)",
@@ -2331,12 +2283,148 @@ const TABS: { id: TabId; label: string; icon: string; accent: string }[] = [
   { id: "scene3d",   label: "3D Сцена",  icon: "Box",       accent: "#06b6d4" },
 ];
 
+// ─── Статусная строка в шапке — использует оба контекста ─────────────────────
+
+function HeaderStatus({ time }: { time: Date }) {
+  const { analysis } = useAudioContext();
+  const { autoSend, sending, scene } = useDirectorContext();
+  const { bpm, isListening } = analysis;
+
+  return (
+    <div className="flex items-center gap-4 mr-4">
+      {/* Микрофон */}
+      <div className="flex items-center gap-1.5">
+        <div className={`w-1.5 h-1.5 rounded-full ${isListening ? "bg-green-400 animate-pulse" : "bg-zinc-600"}`} />
+        <span className="font-mono-tech text-[10px]" style={{ color: isListening ? "#22c55e" : "#52525b" }}>
+          {isListening ? "MIC ON" : "MIC OFF"}
+        </span>
+      </div>
+      {/* BPM */}
+      {bpm > 0 && (
+        <div className="flex items-center gap-1.5">
+          <Icon name="Music" size={11} style={{ color: "#f59e0b" }} />
+          <span className="font-mono-tech text-[10px] text-amber-400">{bpm} BPM</span>
+        </div>
+      )}
+      {/* Автопилот */}
+      <div className="flex items-center gap-1.5">
+        <Icon name="Cpu" size={11} style={{ color: autoSend ? "#a855f7" : "#52525b" }} />
+        <span className="font-mono-tech text-[10px]" style={{ color: autoSend ? "#a855f7" : "#52525b" }}>
+          {autoSend ? (sending ? "TX..." : `AUTO·${scene?.name?.slice(0, 8) ?? "—"}`) : "AUTO·OFF"}
+        </span>
+      </div>
+      <span className="font-mono-tech text-xs text-zinc-600">{time.toLocaleTimeString("ru-RU")}</span>
+    </div>
+  );
+}
+
 // ─── Провайдер аудио-контекста ────────────────────────────────────────────────
 // Единственный экземпляр useWebAudio живёт здесь и не уничтожается при смене вкладок.
 
 function AudioProvider({ children }: { children: React.ReactNode }) {
   const audio = useWebAudio();
   return <AudioCtx.Provider value={audio}>{children}</AudioCtx.Provider>;
+}
+
+// ─── DirectorProvider ─────────────────────────────────────────────────────────
+function DirectorProvider({ children }: { children: React.ReactNode }) {
+  const { analysis } = useAudioContext();
+  const { isListening, bpm } = analysis;
+
+  const [eventType,    setEventType]    = useState<EventType>("club");
+  const [venueSize,    setVenueSize]    = useState<VenueSize>("medium");
+  const [showPolicy,   setShowPolicy]   = useState<ShowPolicy>("balanced");
+  const [directorMode, setDirectorMode] = useState<DirectorMode>("auto");
+  const [artistStyle,  setArtistStyle]  = useState("Electronic / Club");
+  const [crowdLevel,   setCrowdLevel]   = useState(0.6);
+  const [fixtures,     setFixtures]     = useState<FixtureInScene[]>(getDefaultSceneFixtures);
+  const [scene,        setScene]        = useState<GeneratedScene | null>(null);
+  const [autoSend,     setAutoSend]     = useState(false);
+  const [sendInterval, setSendInterval] = useState(2000);
+  const [sending,      setSending]      = useState(false);
+  const [lastSent,     setLastSent]     = useState<string | null>(null);
+
+  const lastSceneKeyRef  = useRef<string>("");
+  const autoSendTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
+
+  const directorOptions = {
+    event_type:    eventType,
+    venue_size:    venueSize,
+    show_policy:   showPolicy,
+    mode:          directorMode,
+    artist_style:  artistStyle,
+    crowd_level:   crowdLevel,
+    current_scene: scene?.name ?? "none",
+  };
+
+  // Генерация сцены при изменении аудио или настроек
+  useEffect(() => {
+    if (!isListening) return;
+    const newScene = generateScene(analysis, fixtures, directorOptions);
+    setScene(newScene);
+    if (newScene.fixtureStates.length > 0) {
+      const colorMap: Record<string, string> = {};
+      newScene.fixtureStates.forEach((fs, idx) => {
+        colorMap[String(idx)]         = fs.color;
+        colorMap[String(fs.fixtureId)] = fs.color;
+      });
+      (window as Record<string, unknown>).__aiSceneColors = colorMap;
+    }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [analysis, fixtures, eventType, venueSize, showPolicy, directorMode, artistStyle, crowdLevel, isListening]);
+
+  // Автопилот DMX — работает независимо от активной вкладки
+  useEffect(() => {
+    if (autoSendTimerRef.current) clearInterval(autoSendTimerRef.current);
+    if (!autoSend || !isListening) return;
+
+    autoSendTimerRef.current = setInterval(async () => {
+      if (!scene) return;
+      const key = `${scene.mood}_${scene.structure}`;
+      const channels = scene.dmxValues.slice(0, 16);
+      setSending(true);
+      const res = await artnetApi.send(channels);
+      if (res.ok) {
+        setLastSent(new Date().toLocaleTimeString("ru-RU"));
+        if (key !== lastSceneKeyRef.current) {
+          lastSceneKeyRef.current = key;
+          const ds = scene.directorScene;
+          await historyApi.add("ai",
+            `[AI Director] ${scene.name} · ${ds.analysis.dramaturgy_phase} · confidence ${Math.round(ds.confidence * 100)}%`,
+            { mood: scene.mood, structure: scene.structure, bpm, phase: ds.analysis.dramaturgy_phase, risk: ds.analysis.risk_level }
+          );
+        }
+      }
+      setSending(false);
+    }, sendInterval);
+
+    return () => { if (autoSendTimerRef.current) clearInterval(autoSendTimerRef.current); };
+  }, [autoSend, isListening, scene, sendInterval, bpm]);
+
+  const manualSend = async () => {
+    if (!scene) return;
+    setSending(true);
+    const channels = scene.dmxValues.slice(0, 16);
+    const res = await artnetApi.send(channels);
+    if (res.ok) {
+      setLastSent(new Date().toLocaleTimeString("ru-RU"));
+      await historyApi.add("manual", `Ручная отправка: ${scene.name}`,
+        { mood: scene.mood, structure: scene.structure, policy: showPolicy });
+    }
+    setSending(false);
+  };
+
+  const value: DirectorContextValue = {
+    eventType, setEventType, venueSize, setVenueSize,
+    showPolicy, setShowPolicy, directorMode, setDirectorMode,
+    artistStyle, setArtistStyle, crowdLevel, setCrowdLevel,
+    fixtures, setFixtures, scene,
+    autoSend, setAutoSend, sendInterval, setSendInterval,
+    sending, lastSent,
+    manualSend,
+  };
+
+  return <DirectorCtx.Provider value={value}>{children}</DirectorCtx.Provider>;
 }
 
 export default function Index() {
@@ -2360,6 +2448,7 @@ export default function Index() {
 
   return (
     <AudioProvider>
+    <DirectorProvider>
     <div className="h-screen w-screen bg-zinc-950 flex flex-col overflow-hidden" style={{ fontFamily: "'Rajdhani', sans-serif" }}>
       {/* Top Bar */}
       <header className="flex items-center px-4 py-2 border-b border-zinc-800 bg-black/70 shrink-0">
@@ -2376,24 +2465,7 @@ export default function Index() {
 
         <div className="flex-1" />
 
-        <div className="flex items-center gap-5 mr-5">
-          <div className="flex items-center gap-1.5">
-            <div className="w-1.5 h-1.5 rounded-full bg-green-400 animate-pulse" />
-            <span className="font-mono-tech text-[10px] text-green-400">ART-NET OK</span>
-          </div>
-          <div className="flex items-center gap-1.5">
-            <Icon name="Cpu" size={11} style={{ color: "#a855f7" }} />
-            <span className="font-mono-tech text-[10px] text-purple-400">AI ACTIVE</span>
-          </div>
-          <div className="flex items-center gap-1.5">
-            <Icon name="Music" size={11} style={{ color: "#f59e0b" }} />
-            <span className="font-mono-tech text-[10px] text-amber-400">138 BPM</span>
-          </div>
-        </div>
-
-        <span className="font-mono-tech text-xs text-zinc-600">
-          {time.toLocaleTimeString("ru-RU")}
-        </span>
+        <HeaderStatus time={time} />
       </header>
 
       {/* Navigation */}
@@ -2416,11 +2488,13 @@ export default function Index() {
         })}
       </nav>
 
-      {/* Main */}
+      {/* Main — panels рендерятся через display:none чтобы не размонтироваться */}
       <main className="flex-1 overflow-hidden p-4">
-        <div key={activeTab} className="h-full animate-fade-in">
-          {panels[activeTab]}
-        </div>
+        {(Object.keys(panels) as TabId[]).map(tabId => (
+          <div key={tabId} className="h-full" style={{ display: activeTab === tabId ? "block" : "none" }}>
+            {panels[tabId]}
+          </div>
+        ))}
       </main>
 
       {/* Status bar */}
@@ -2432,6 +2506,7 @@ export default function Index() {
         <span className="font-mono-tech text-[10px] text-green-500">● СИСТЕМА ГОТОВА</span>
       </footer>
     </div>
+    </DirectorProvider>
     </AudioProvider>
   );
 }
