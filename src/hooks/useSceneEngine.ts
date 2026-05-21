@@ -81,117 +81,131 @@ function buildFixtureDMX(
 ): number[] {
   const dmx = new Array(channelCount).fill(0);
   const { r, g, b } = color;
-  const dimmer = Math.round(dirScene.parameters.intensity * 255);
-  const strobe = dirScene.parameters.strobe;
-  const movement = dirScene.parameters.movement;
+  const p = dirScene.parameters;
   const structure = dirScene.context.section as TrackStructure;
-  const energy = dirScene.context.energy;
-  const bass_energy = dirScene.dmx_actions.find(a => a.channel === 5)?.value ?? 0;
+  const energy    = dirScene.context.energy;
 
-  // Скорость в зависимости от movement
-  const speedMap = { static: 0, slow: 60, medium: 130, fast: 220 };
-  const speed = speedMap[movement] ?? 130;
+  // Используем точные значения из директора
+  const dimmer     = Math.round(p.intensity * 255);
+  const strobeRate = p.strobe_rate ?? 0;
+  const speed      = p.pan_speed ?? (p.movement === "fast" ? 220 : p.movement === "medium" ? 130 : 60);
+  const zoom       = p.zoom ?? (p.beam_width === "narrow" ? 60 : p.beam_width === "wide" ? 200 : 128);
+  const warmVal    = Math.round(p.warmth * 255);
 
-  // Частота строба
-  const strobeVal = strobe && structure === "drop" ? Math.round(60 + energy * 120) : 0;
+  // Pan/Tilt — уникальные позиции для каждого прибора
+  const panPositions  = [80, 176, 60, 196, 110, 145, 100, 156, 90, 128];
+  const tiltPositions = [85, 90, 110, 100, 85, 90, 95, 80, 75, 70];
+  // На дропе — динамический разброс, на breakdown — тихий ambient
+  const basePan  = panPositions[fixtureIndex % panPositions.length];
+  const baseTilt = tiltPositions[fixtureIndex % tiltPositions.length];
+  const spread   = structure === "drop" ? Math.round(energy * 35) : 0;
+  const pan  = Math.min(255, Math.max(0, basePan  + (fixtureIndex % 2 === 0 ? -spread : spread)));
+  const tilt = Math.min(255, Math.max(0, baseTilt - (structure === "drop" ? Math.round(energy * 20) : 0)));
 
-  // Разные позиции pan/tilt для разных приборов
-  const panPositions = [80, 128, 176, 60, 196, 100, 156, 110, 145, 90];
-  const tiltPositions = [100, 80, 120, 70, 100, 90, 110, 85, 95, 75];
-  const pan = panPositions[fixtureIndex % panPositions.length];
-  const tilt = tiltPositions[fixtureIndex % tiltPositions.length];
-
-  // Модификатор зума
-  const zoom = dirScene.parameters.beam_width === "narrow" ? 60
-    : dirScene.parameters.beam_width === "wide" ? 200
-    : 128;
+  // Gobo и призма
+  const goboVal   = p.gobo_rotate ? Math.round(10 + energy * 50) : 0;
+  const prismVal  = p.prism ? 127 : 0;
 
   switch (fixtureType) {
+
     case "LED Par": {
-      // CH1:Dim CH2:R CH3:G CH4:B CH5:W CH6:Amber CH7:UV CH8:Strobe
+      // CH1:Dimmer  CH2:R  CH3:G  CH4:B  CH5:White  CH6:Amber  CH7:UV  CH8:Strobe
       dmx[0] = dimmer;
       dmx[1] = r;
       dmx[2] = g;
       dmx[3] = b;
-      dmx[4] = dirScene.parameters.warmth > 0.6 ? Math.round(dimmer * 0.4) : 0;
-      dmx[5] = dirScene.parameters.warmth > 0.4 ? Math.round(dimmer * 0.3) : 0;
-      dmx[6] = energy > 0.7 && !strobe ? Math.round(energy * 60) : 0;
-      dmx[7] = strobeVal;
+      // Белый — при вокале или тёплом режиме
+      dmx[4] = p.warmth > 0.55 ? Math.round(warmVal * 0.5) : 0;
+      // Amber — при тёплом и вокальном режиме
+      dmx[5] = p.warmth > 0.4 ? Math.round(warmVal * 0.35) : 0;
+      // UV — при тёмном mood + высокая энергия
+      dmx[6] = (energy > 0.7 && !p.strobe && structure === "drop") ? Math.round(energy * 70) : 0;
+      // Strobe — точная частота из директора
+      dmx[7] = strobeRate;
       break;
     }
 
     case "Moving Head": {
-      // Pan, Pan Fine, Tilt, Tilt Fine, Speed, Dimmer, Strobe, R, G, B, W, Zoom...
+      // CH1:Pan  CH2:PanFine  CH3:Tilt  CH4:TiltFine  CH5:Speed
+      // CH6:Dimmer  CH7:Strobe  CH8:R  CH9:G  CH10:B  CH11:White
+      // CH12:Zoom  CH13:Focus  CH14:Gobo  CH15:GoboRot/Prism  CH16:Reset
       dmx[0] = pan;
       dmx[1] = 0;
       dmx[2] = tilt;
       dmx[3] = 0;
       dmx[4] = speed;
       dmx[5] = dimmer;
-      dmx[6] = strobeVal;
+      dmx[6] = strobeRate;
       if (channelCount >= 10) { dmx[7] = r; dmx[8] = g; dmx[9] = b; }
-      if (channelCount >= 12) { dmx[10] = 0; dmx[11] = zoom; }
-      if (channelCount >= 14) { dmx[12] = Math.round(zoom * 0.8); dmx[13] = 0; }
+      if (channelCount >= 12) { dmx[10] = p.warmth > 0.5 ? Math.round(warmVal * 0.4) : 0; dmx[11] = zoom; }
+      if (channelCount >= 14) { dmx[12] = 128; dmx[13] = p.gobo_index ?? 0; }
       if (channelCount >= 16) {
-        dmx[14] = structure === "drop" ? Math.round(energy * 180) : 0; // effects
-        dmx[15] = 0; // reset
+        dmx[14] = prismVal || goboVal;
+        dmx[15] = 0; // reset — никогда не трогаем
       }
       break;
     }
 
     case "Strobe": {
-      // Intensity, Frequency, Mode, Random, Color
-      const strobeActive = strobe && (structure === "drop" || structure === "buildup");
-      const freq = strobeActive ? Math.round(30 + energy * 170) : 0;
-      dmx[0] = strobeActive ? dimmer : 0;
-      dmx[1] = freq;
-      dmx[2] = energy > 0.75 ? 20 : 0;
-      dmx[3] = energy > 0.8 ? 60 : 0;
+      // CH1:Intensity  CH2:Rate  CH3:Mode  CH4:Random  CH5:Color
+      const strobeOn = p.strobe && (structure === "drop" || structure === "buildup");
+      dmx[0] = strobeOn ? Math.min(255, dimmer + 30) : 0;
+      dmx[1] = strobeOn ? strobeRate : 0;
+      // Mode: 0=random, 20=sync, 40=burst — на дропе burst
+      dmx[2] = structure === "drop" && energy > 0.8 ? 40 : strobeOn ? 20 : 0;
+      dmx[3] = structure === "drop" && energy > 0.85 ? 80 : 0;
+      // Цвет строба чередуется по индексу (левый/правый)
       dmx[4] = fixtureIndex % 2 === 0 ? r : b;
       break;
     }
 
     case "Spot": {
-      // Intensity, R, G, B, Indigo, Cycle
+      // CH1:Dimmer  CH2:R  CH3:G  CH4:B  CH5:Indigo  CH6:Gobo  CH7:Rotate  CH8:Zoom
       dmx[0] = dimmer;
       dmx[1] = r;
       dmx[2] = g;
       dmx[3] = b;
-      dmx[4] = energy > 0.6 ? Math.round(energy * 120) : 0;
-      dmx[5] = 0;
+      // Indigo/UV — только при тёмном mood
+      dmx[4] = (energy > 0.55 && structure === "drop") ? Math.round(energy * 130) : 0;
+      if (channelCount >= 6) dmx[5] = p.gobo_index ?? 0;
+      if (channelCount >= 7) dmx[6] = goboVal;
+      if (channelCount >= 8) dmx[7] = zoom;
       break;
     }
 
     case "Wash": {
-      // R, G, B, W, Dimmer, Strobe, Mode
+      // CH1:R  CH2:G  CH3:B  CH4:White  CH5:Dimmer  CH6:Strobe  CH7:Mode
       dmx[0] = r;
       dmx[1] = g;
       dmx[2] = b;
-      dmx[3] = dirScene.parameters.warmth > 0.5 ? Math.round(dimmer * 0.5) : 0;
+      dmx[3] = p.warmth > 0.45 ? Math.round(warmVal * 0.55) : 0;
       dmx[4] = dimmer;
-      dmx[5] = strobe && structure === "drop" ? strobeVal : 0;
+      // Wash строб только на дропе и только если политика разрешает
+      dmx[5] = p.strobe && structure === "drop" ? Math.min(180, strobeRate) : 0;
       dmx[6] = 0;
       break;
     }
 
     case "Laser": {
-      const fogMap = { off: 0, low: 60, medium: 130, high: 210 };
-      const laserOn = structure === "drop" && energy > 0.6;
+      // CH1:Enable  CH2:Pattern  CH3:Size  CH4:Rotation  CH5:Speed  CH6:Color
+      // Лазер включаем если strobe_rate > 0 (не safe-режим) или drop + высокая энергия
+      const laserOn = (p.strobe_rate ?? 0) >= 0 && structure === "drop" && energy > 0.58 && p.visual_density !== "low";
       dmx[0] = laserOn ? 255 : 0;
-      dmx[1] = Math.round(energy * 200);
-      dmx[2] = Math.round(100 + energy * 80);
-      dmx[3] = Math.round(energy * 180);
-      dmx[4] = Math.round(100 + energy * 100);
-      dmx[5] = Math.round(fixtureIndex * 42) % 255;
-      // Используем fogMap для возможного расширения
-      void bass_energy;
-      void fogMap;
+      // Pattern: 0-50=static, 51-100=scan, 101-150=scatter, 151-200=radial
+      dmx[1] = structure === "drop" ? Math.round(100 + energy * 80) : Math.round(energy * 50);
+      dmx[2] = Math.round(80 + energy * 100);
+      // Rotation: быстрее на дропе
+      dmx[3] = structure === "drop" ? Math.round(100 + energy * 120) : Math.round(energy * 60);
+      dmx[4] = Math.round(80 + energy * 120);
+      // Colour cycling offset per fixture
+      dmx[5] = (fixtureIndex * 43 + Math.round(energy * 60)) % 255;
       break;
     }
 
     default: {
       dmx[0] = dimmer;
       if (channelCount >= 4) { dmx[1] = r; dmx[2] = g; dmx[3] = b; }
+      if (channelCount >= 5) dmx[4] = strobeRate;
       break;
     }
   }
@@ -204,23 +218,25 @@ function buildFixtureDMX(
 function getFixtureRole(
   fixtureType: string,
   structure: string,
-  strobe: boolean,
-  intensity: number
+  strobeRate: number,
+  intensity: number,
+  vocal: number
 ): string {
   switch (fixtureType) {
     case "Moving Head":
-      return structure === "drop" ? "активное движение + цвет" : `позиция, ${intensity}%`;
+      return structure === "drop" ? `sweep·${intensity}%` : `position·${intensity}%`;
     case "Strobe":
-      return strobe && structure === "drop" ? `строб активен` : "выкл";
+      return strobeRate > 0 && structure === "drop" ? `strobe ${strobeRate} DMX` : "off";
     case "Laser":
-      return structure === "drop" && intensity > 60 ? "лазер активен" : "лазер выкл";
+      return structure === "drop" && intensity > 55 ? `laser·active` : "laser·standby";
     case "LED Par":
+      return vocal > 0.5 ? `warm fill·${intensity}%` : `color·${intensity}%`;
     case "Wash":
-      return `цвет + яркость ${intensity}%`;
+      return `wash·${intensity}%`;
     case "Spot":
-      return intensity > 50 ? `акцент, ${intensity}%` : `фон, ${intensity}%`;
+      return intensity > 50 ? `spot·accent·${intensity}%` : `spot·fill·${intensity}%`;
     default:
-      return `яркость ${intensity}%`;
+      return `dim·${intensity}%`;
   }
 }
 
@@ -283,8 +299,9 @@ export function generateScene(
       role: getFixtureRole(
         fixture.type,
         dirScene.context.section,
-        dirScene.parameters.strobe,
-        intensity
+        dirScene.parameters.strobe_rate ?? 0,
+        intensity,
+        dirScene.parameters.warmth  // warmth как косвенный индикатор вокала (высокий warmth = vocal mode)
       ),
     });
   }

@@ -12,8 +12,72 @@
  */
 
 import { useState, useEffect, useRef, useCallback } from "react";
-import { shazamApi } from "@/lib/api";
 import type { ShazamTrack } from "@/lib/api";
+
+// ─── Прямой вызов Shazam Core с браузера (RapidAPI разрешает CORS-запросы) ────
+// Ключ хранится в localStorage под именем "rapidapi_key"
+
+async function callShazamDirect(wavB64: string): Promise<{ matched: boolean; track: ShazamTrack | null }> {
+  const apiKey = localStorage.getItem("rapidapi_key") ?? "";
+  if (!apiKey) throw new Error("RAPIDAPI_KEY not set");
+
+  // Конвертируем base64 → Blob (бинарный WAV)
+  const binaryStr = atob(wavB64);
+  const bytes = new Uint8Array(binaryStr.length);
+  for (let i = 0; i < binaryStr.length; i++) bytes[i] = binaryStr.charCodeAt(i);
+  const blob = new Blob([bytes], { type: "audio/wav" });
+
+  const resp = await fetch("https://shazam-core.p.rapidapi.com/v1/tracks/recognize", {
+    method: "POST",
+    headers: {
+      "X-RapidAPI-Key":  apiKey,
+      "X-RapidAPI-Host": "shazam-core.p.rapidapi.com",
+    },
+    body: blob,
+  });
+
+  if (!resp.ok) {
+    const txt = await resp.text();
+    console.warn("[shazam] API error", resp.status, txt.slice(0, 200));
+    throw new Error(`Shazam ${resp.status}: ${txt.slice(0, 100)}`);
+  }
+
+  const data = await resp.json();
+  console.log("[shazam] raw response keys:", Object.keys(data));
+
+  const track = data?.track;
+  if (!track) return { matched: false, track: null };
+
+  // Извлекаем BPM и тональность из секции SONG
+  let bpm = 0, key = "", tempo = "";
+  for (const section of track.sections ?? []) {
+    if (section.type === "SONG") {
+      for (const m of section.metadata ?? []) {
+        const t = (m.title ?? "").toLowerCase();
+        if (t.includes("bpm"))   bpm   = parseInt(m.text) || 0;
+        if (t.includes("key"))   key   = m.text ?? "";
+        if (t.includes("tempo")) tempo = m.text ?? "";
+      }
+    }
+  }
+
+  return {
+    matched: true,
+    track: {
+      title:       track.title ?? "",
+      artist:      track.subtitle ?? "",
+      genre:       track.genres?.primary ?? "",
+      bpm,
+      key,
+      tempo,
+      cover_url:   track.images?.coverarthq ?? track.images?.coverart ?? "",
+      shazam_url:  track.url ?? "",
+      spotify_url: "",
+      apple_url:   "",
+      shazam_id:   track.key ?? "",
+    },
+  };
+}
 
 export type TrackStructure = "intro" | "buildup" | "drop" | "breakdown" | "outro" | "unknown";
 export type MoodType =
@@ -355,7 +419,8 @@ export function useWebAudio() {
     setAnalysis(prev => ({ ...prev, isListening: false }));
   }, []);
 
-  // ─── Shazam: запись 5 сек → base64 WAV → API ──────────────────────────────
+  // ─── Shazam: запись через AudioWorklet/ScriptProcessor → WAV → API ──────────
+  // Используем AudioContext на нативной частоте + ресемплирование до 16kHz вручную
 
   const runShazam = useCallback(async (stream: MediaStream) => {
     if (shazamBusy.current) return;
@@ -366,35 +431,52 @@ export function useWebAudio() {
     setAnalysis(prev => ({ ...prev, shazam: { ...shazamRef.current } }));
 
     try {
-      // Отдельный AudioContext на 16 kHz
-      const sCtx = new AudioContext({ sampleRate: SHAZAM_RATE });
-      const buffers: Float32Array[] = [];
+      // Записываем через OfflineAudioContext + нативный sampleRate
+      const nativeCtx = new AudioContext();
+      const nativeSR  = nativeCtx.sampleRate; // обычно 44100 или 48000
 
+      const buffers: Float32Array[] = [];
        
-      const scriptNode = sCtx.createScriptProcessor(4096, 1, 1);
+      const scriptNode = nativeCtx.createScriptProcessor(8192, 1, 1);
       scriptNode.onaudioprocess = (e) => {
         buffers.push(new Float32Array(e.inputBuffer.getChannelData(0)));
       };
-
-      const sSource = sCtx.createMediaStreamSource(stream);
-      sSource.connect(scriptNode);
-      scriptNode.connect(sCtx.destination);
+      const src = nativeCtx.createMediaStreamSource(stream);
+      src.connect(scriptNode);
+      scriptNode.connect(nativeCtx.destination);
 
       await new Promise(r => setTimeout(r, SHAZAM_SAMPLE_MS));
 
       scriptNode.disconnect();
-      sSource.disconnect();
-      sCtx.close();
+      src.disconnect();
+      nativeCtx.close();
 
-      const total = buffers.reduce((s, b) => s + b.length, 0);
-      if (total < 1000) throw new Error("too short");
+      // Собираем PCM @ nativeSR
+      const totalSamples = buffers.reduce((s, b) => s + b.length, 0);
+      if (totalSamples < nativeSR * 2) throw new Error(`too short: ${totalSamples} samples`);
 
-      const pcm = new Float32Array(total);
+      const nativePCM = new Float32Array(totalSamples);
       let off = 0;
-      for (const b of buffers) { pcm.set(b, off); off += b.length; }
+      for (const b of buffers) { nativePCM.set(b, off); off += b.length; }
 
-      const wavB64 = pcmToWavBase64(pcm, SHAZAM_RATE);
-      const result = await shazamApi.recognize(wavB64);
+      // Ресемплирование до 16kHz через OfflineAudioContext
+      const targetSR    = SHAZAM_RATE;
+      const targetLen   = Math.ceil(totalSamples * targetSR / nativeSR);
+      const offCtx      = new OfflineAudioContext(1, targetLen, targetSR);
+      const srcBuf      = offCtx.createBuffer(1, totalSamples, nativeSR);
+      srcBuf.copyToChannel(nativePCM, 0);
+      const offSrc      = offCtx.createBufferSource();
+      offSrc.buffer     = srcBuf;
+      offSrc.connect(offCtx.destination);
+      offSrc.start(0);
+      const rendered    = await offCtx.startRendering();
+      const pcm16k      = rendered.getChannelData(0);
+
+      const wavB64 = pcmToWavBase64(pcm16k, targetSR);
+      console.log(`[shazam] sending ${pcm16k.length} samples @ ${targetSR}Hz, wav b64 len=${wavB64.length}`);
+
+      const result = await callShazamDirect(wavB64);
+      console.log("[shazam] result:", result);
 
       if (result.matched && result.track) {
         shazamRef.current = { status: "matched", track: result.track, lastAttempt: Date.now() };
@@ -406,7 +488,8 @@ export function useWebAudio() {
       } else {
         shazamRef.current = { status: "no_match", track: shazamRef.current.track, lastAttempt: Date.now() };
       }
-    } catch {
+    } catch (err) {
+      console.error("[shazam] error:", err);
       shazamRef.current = { status: "error", track: shazamRef.current.track, lastAttempt: Date.now() };
     } finally {
       shazamBusy.current = false;

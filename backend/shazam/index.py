@@ -59,51 +59,61 @@ def handler(event: dict, context) -> dict:
     # Декодируем аудио из base64
     try:
         audio_bytes = base64.b64decode(audio_b64)
-    except Exception:
+    except Exception as e:
+        print(f"[shazam] base64 decode error: {e}, b64 length={len(audio_b64)}")
         return {
             "statusCode": 400,
             "headers": HEADERS_CORS,
             "body": json.dumps({"error": "Invalid base64 audio data"}),
         }
 
+    print(f"[shazam] audio_bytes={len(audio_bytes)}, first4={audio_bytes[:4]}, b64_len={len(audio_b64)}")
+
     # Отправляем в Shazam Core API
+    # Shazam Core ожидает сырые байты аудио (WAV) с content-type audio/wav
     try:
-        conn = http.client.HTTPSConnection("shazam-core.p.rapidapi.com", timeout=15)
+        conn = http.client.HTTPSConnection("shazam-core.p.rapidapi.com", timeout=20)
         conn.request(
             "POST",
             "/v1/tracks/recognize",
             body=audio_bytes,
             headers={
-                "content-type": "text/plain",
+                "content-type": "audio/wav; charset=utf-8",
                 "X-RapidAPI-Key": api_key,
                 "X-RapidAPI-Host": "shazam-core.p.rapidapi.com",
             },
         )
         resp = conn.getresponse()
+        resp_status = resp.status
         resp_body = resp.read().decode("utf-8")
         conn.close()
+        print(f"[shazam] response status={resp_status}, body_len={len(resp_body)}, body_preview={resp_body[:200]}")
     except Exception as e:
+        print(f"[shazam] HTTP error: {e}")
         return {
             "statusCode": 502,
             "headers": HEADERS_CORS,
             "body": json.dumps({"error": f"Shazam API error: {str(e)}"}),
         }
 
-    if resp.status != 200:
+    if resp_status != 200:
         return {
-            "statusCode": resp.status,
+            "statusCode": resp_status,
             "headers": HEADERS_CORS,
-            "body": json.dumps({"error": f"Shazam returned {resp.status}", "detail": resp_body[:300]}),
+            "body": json.dumps({"error": f"Shazam returned {resp_status}", "detail": resp_body[:500]}),
         }
 
     try:
         data = json.loads(resp_body)
-    except Exception:
+    except Exception as e:
+        print(f"[shazam] JSON parse error: {e}, raw={resp_body[:200]}")
         return {
             "statusCode": 502,
             "headers": HEADERS_CORS,
-            "body": json.dumps({"error": "Failed to parse Shazam response"}),
+            "body": json.dumps({"error": "Failed to parse Shazam response", "raw": resp_body[:200]}),
         }
+
+    print(f"[shazam] parsed keys={list(data.keys())}")
 
     # Извлекаем нужные поля из ответа Shazam Core
     track = data.get("track", {})

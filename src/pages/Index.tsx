@@ -1148,6 +1148,14 @@ function AutoScenePanel() {
   const [crowdLevel, setCrowdLevel] = useState(0.6);
   const [settingsOpen, setSettingsOpen] = useState(false);
 
+  // RapidAPI ключ — хранится в localStorage
+  const [rapidApiKey, setRapidApiKey] = useState<string>(() => localStorage.getItem("rapidapi_key") ?? "");
+  const [keyInputOpen, setKeyInputOpen] = useState(false);
+  const saveApiKey = (val: string) => {
+    setRapidApiKey(val);
+    localStorage.setItem("rapidapi_key", val);
+  };
+
   const [autoSend, setAutoSend] = useState(false);
   const [fixtures, setFixtures] = useState<FixtureInScene[]>(getDefaultSceneFixtures);
   const [scene, setScene] = useState<GeneratedScene | null>(null);
@@ -1261,70 +1269,103 @@ function AutoScenePanel() {
       )}
 
       {/* ─── Shazam ─── */}
-      {isListening && (
-        <div className="p-2.5 bg-zinc-900 border rounded overflow-hidden"
-          style={{ borderColor: shazam.status === "matched" ? "rgba(34,197,94,0.35)" : "rgba(63,63,70,0.8)" }}>
-          <div className="flex items-center justify-between mb-1.5">
-            <div className="flex items-center gap-2">
-              <span className="font-display text-[9px] tracking-widest"
-                style={{ color: shazam.status === "matched" ? "#22c55e" : shazam.status === "loading" ? "#f59e0b" : shazam.status === "error" ? "#ef4444" : "#52525b" }}>
-                SHAZAM
+      <div className="bg-zinc-900 border rounded overflow-hidden"
+        style={{ borderColor: shazam.status === "matched" ? "rgba(34,197,94,0.3)" : "rgba(63,63,70,0.7)" }}>
+
+        {/* Заголовок */}
+        <div className="flex items-center justify-between px-2.5 pt-2.5 pb-1.5">
+          <div className="flex items-center gap-2">
+            <span className="font-display text-[9px] tracking-widest"
+              style={{ color: shazam.status === "matched" ? "#22c55e" : shazam.status === "loading" ? "#f59e0b" : shazam.status === "error" ? "#ef4444" : "#52525b" }}>
+              SHAZAM
+            </span>
+            {shazam.status === "loading" && <span className="font-mono-tech text-[8px] text-amber-400 animate-pulse">РАСПОЗНАЮ...</span>}
+            {shazam.status === "matched" && <span className="font-mono-tech text-[8px] text-green-500">✓ НАЙДЕНО</span>}
+            {shazam.status === "no_match" && <span className="font-mono-tech text-[8px] text-zinc-600">НЕ НАЙДЕНО</span>}
+            {shazam.status === "error" && (
+              <span className="font-mono-tech text-[8px] text-red-400 cursor-pointer" onClick={() => setKeyInputOpen(v => !v)}>
+                ⚠ КЛЮЧ?
               </span>
-              {shazam.status === "loading" && (
-                <span className="font-mono-tech text-[8px] text-amber-400 animate-pulse">РАСПОЗНАЮ...</span>
-              )}
-              {shazam.status === "matched" && (
-                <span className="font-mono-tech text-[8px] text-green-500">✓ НАЙДЕНО</span>
-              )}
-              {shazam.status === "no_match" && (
-                <span className="font-mono-tech text-[8px] text-zinc-600">НЕ НАЙДЕНО</span>
-              )}
-              {shazam.status === "error" && (
-                <span className="font-mono-tech text-[8px] text-red-400">ОШИБКА</span>
-              )}
-            </div>
-            <button
-              onClick={triggerShazam}
-              disabled={shazam.status === "loading" || !isListening}
-              className="px-2 py-0.5 font-display text-[8px] tracking-widest border rounded transition-all disabled:opacity-40"
-              style={{ borderColor: "rgba(34,197,94,0.4)", color: "#22c55e", background: "rgba(34,197,94,0.06)" }}
-            >
+            )}
+          </div>
+          <div className="flex items-center gap-1.5">
+            <button onClick={() => setKeyInputOpen(v => !v)}
+              className="px-1.5 py-0.5 font-display text-[7px] tracking-widest border border-zinc-700 rounded text-zinc-600 hover:text-zinc-400 transition-colors">
+              KEY
+            </button>
+            <button onClick={triggerShazam}
+              disabled={shazam.status === "loading" || !isListening || !rapidApiKey}
+              className="px-2 py-0.5 font-display text-[8px] tracking-widest border rounded transition-all disabled:opacity-35"
+              style={{ borderColor: "rgba(34,197,94,0.4)", color: "#22c55e", background: "rgba(34,197,94,0.06)" }}>
               ⚡ РАСПОЗНАТЬ
             </button>
           </div>
+        </div>
 
-          {shazam.track ? (
-            <div className="flex items-center gap-2.5">
-              {shazam.track.cover_url && (
-                <img
-                  src={shazam.track.cover_url}
-                  alt="cover"
-                  className="w-10 h-10 rounded object-cover shrink-0 border border-zinc-700"
-                />
-              )}
-              <div className="flex-1 min-w-0">
-                <div className="font-mono-tech text-xs text-white font-bold truncate">{shazam.track.title}</div>
-                <div className="font-body text-[10px] text-zinc-400 truncate">{shazam.track.artist}</div>
-                <div className="flex items-center gap-2 mt-0.5">
-                  {shazam.track.genre && (
-                    <span className="font-display text-[8px] tracking-widest text-cyan-400">{shazam.track.genre}</span>
-                  )}
-                  {shazam.track.bpm > 0 && (
-                    <span className="font-mono-tech text-[8px] text-amber-400">{shazam.track.bpm} BPM</span>
-                  )}
-                  {shazam.track.key && (
-                    <span className="font-mono-tech text-[8px] text-purple-400">{shazam.track.key}</span>
-                  )}
+        {/* Поле ввода ключа */}
+        {keyInputOpen && (
+          <div className="px-2.5 pb-2 border-t border-zinc-800 pt-2">
+            <div className="font-display text-[8px] tracking-widest text-zinc-600 mb-1">
+              RAPIDAPI KEY — <a href="https://rapidapi.com/search/shazam-core" target="_blank" rel="noreferrer" className="text-cyan-700 hover:text-cyan-500">получить на rapidapi.com</a>
+            </div>
+            <div className="flex gap-1.5">
+              <input
+                type="password"
+                value={rapidApiKey}
+                onChange={e => saveApiKey(e.target.value)}
+                placeholder="Вставь X-RapidAPI-Key..."
+                className="flex-1 bg-zinc-800 border border-zinc-700 rounded px-2 py-1 text-[10px] font-mono-tech text-zinc-300 focus:outline-none focus:border-green-500/50"
+              />
+              <button onClick={() => { saveApiKey(rapidApiKey); setKeyInputOpen(false); }}
+                className="px-2 py-1 font-display text-[8px] tracking-widest border border-green-500/40 rounded text-green-400 hover:bg-green-500/10 transition-colors">
+                ✓
+              </button>
+            </div>
+            {rapidApiKey && <div className="font-mono-tech text-[8px] text-green-600 mt-1">✓ Ключ сохранён в браузере</div>}
+          </div>
+        )}
+
+        {/* Нет ключа — подсказка */}
+        {!rapidApiKey && !keyInputOpen && (
+          <div className="px-2.5 pb-2.5">
+            <button onClick={() => setKeyInputOpen(true)}
+              className="w-full py-1.5 font-display text-[8px] tracking-widest border border-dashed border-zinc-700 rounded text-zinc-600 hover:text-zinc-400 hover:border-zinc-500 transition-colors">
+              + ДОБАВИТЬ RAPIDAPI KEY ДЛЯ РАСПОЗНАВАНИЯ
+            </button>
+          </div>
+        )}
+
+        {/* Результат распознавания */}
+        {rapidApiKey && !keyInputOpen && (
+          <div className="px-2.5 pb-2.5">
+            {shazam.track ? (
+              <div className="flex items-center gap-2.5">
+                {shazam.track.cover_url && (
+                  <img src={shazam.track.cover_url} alt="cover"
+                    className="w-10 h-10 rounded object-cover shrink-0 border border-zinc-700" />
+                )}
+                <div className="flex-1 min-w-0">
+                  <div className="font-mono-tech text-xs text-white font-bold truncate">{shazam.track.title}</div>
+                  <div className="font-body text-[10px] text-zinc-400 truncate">{shazam.track.artist}</div>
+                  <div className="flex items-center gap-2 mt-0.5 flex-wrap">
+                    {shazam.track.genre && <span className="font-display text-[8px] tracking-widest text-cyan-400">{shazam.track.genre}</span>}
+                    {shazam.track.bpm > 0 && <span className="font-mono-tech text-[8px] text-amber-400">{shazam.track.bpm} BPM</span>}
+                    {shazam.track.key && <span className="font-mono-tech text-[8px] text-purple-400">{shazam.track.key}</span>}
+                  </div>
                 </div>
               </div>
-            </div>
-          ) : (
-            <div className="font-display text-[9px] tracking-widest text-zinc-700">
-              {shazam.status === "idle" ? "Первое распознавание через 8 сек после старта" : "Слушаю..."}
-            </div>
-          )}
-        </div>
-      )}
+            ) : (
+              <div className="font-display text-[8px] tracking-widest text-zinc-700">
+                {!isListening ? "Включи микрофон для распознавания" :
+                  shazam.status === "idle" ? "Автораспознавание через 8 сек..." :
+                  shazam.status === "loading" ? "Анализирую аудио..." :
+                  shazam.status === "error" ? "Ошибка API — проверь ключ" :
+                  "Трек не определён"}
+              </div>
+            )}
+          </div>
+        )}
+      </div>
 
       {/* ─── Музыкальный анализ ─── */}
       <div className="grid grid-cols-2 gap-2">
