@@ -1136,8 +1136,8 @@ const PHASE_LABELS: Record<string, string> = {
 };
 
 function AutoScenePanel() {
-  const { analysis, start, stop } = useWebAudio();
-  const { mood, structure, structureProgress, energyTrend, bpm, energy, genre, trackFeatures, isListening, error } = analysis;
+  const { analysis, start, stop, triggerShazam } = useWebAudio();
+  const { mood, structure, structureProgress, energyTrend, bpm, energy, genre, trackFeatures, shazam, isListening, error } = analysis;
 
   // ─── Director parameters ──
   const [eventType, setEventType] = useState<EventType>("club");
@@ -1260,6 +1260,72 @@ function AutoScenePanel() {
         </div>
       )}
 
+      {/* ─── Shazam ─── */}
+      {isListening && (
+        <div className="p-2.5 bg-zinc-900 border rounded overflow-hidden"
+          style={{ borderColor: shazam.status === "matched" ? "rgba(34,197,94,0.35)" : "rgba(63,63,70,0.8)" }}>
+          <div className="flex items-center justify-between mb-1.5">
+            <div className="flex items-center gap-2">
+              <span className="font-display text-[9px] tracking-widest"
+                style={{ color: shazam.status === "matched" ? "#22c55e" : shazam.status === "loading" ? "#f59e0b" : shazam.status === "error" ? "#ef4444" : "#52525b" }}>
+                SHAZAM
+              </span>
+              {shazam.status === "loading" && (
+                <span className="font-mono-tech text-[8px] text-amber-400 animate-pulse">РАСПОЗНАЮ...</span>
+              )}
+              {shazam.status === "matched" && (
+                <span className="font-mono-tech text-[8px] text-green-500">✓ НАЙДЕНО</span>
+              )}
+              {shazam.status === "no_match" && (
+                <span className="font-mono-tech text-[8px] text-zinc-600">НЕ НАЙДЕНО</span>
+              )}
+              {shazam.status === "error" && (
+                <span className="font-mono-tech text-[8px] text-red-400">ОШИБКА</span>
+              )}
+            </div>
+            <button
+              onClick={triggerShazam}
+              disabled={shazam.status === "loading" || !isListening}
+              className="px-2 py-0.5 font-display text-[8px] tracking-widest border rounded transition-all disabled:opacity-40"
+              style={{ borderColor: "rgba(34,197,94,0.4)", color: "#22c55e", background: "rgba(34,197,94,0.06)" }}
+            >
+              ⚡ РАСПОЗНАТЬ
+            </button>
+          </div>
+
+          {shazam.track ? (
+            <div className="flex items-center gap-2.5">
+              {shazam.track.cover_url && (
+                <img
+                  src={shazam.track.cover_url}
+                  alt="cover"
+                  className="w-10 h-10 rounded object-cover shrink-0 border border-zinc-700"
+                />
+              )}
+              <div className="flex-1 min-w-0">
+                <div className="font-mono-tech text-xs text-white font-bold truncate">{shazam.track.title}</div>
+                <div className="font-body text-[10px] text-zinc-400 truncate">{shazam.track.artist}</div>
+                <div className="flex items-center gap-2 mt-0.5">
+                  {shazam.track.genre && (
+                    <span className="font-display text-[8px] tracking-widest text-cyan-400">{shazam.track.genre}</span>
+                  )}
+                  {shazam.track.bpm > 0 && (
+                    <span className="font-mono-tech text-[8px] text-amber-400">{shazam.track.bpm} BPM</span>
+                  )}
+                  {shazam.track.key && (
+                    <span className="font-mono-tech text-[8px] text-purple-400">{shazam.track.key}</span>
+                  )}
+                </div>
+              </div>
+            </div>
+          ) : (
+            <div className="font-display text-[9px] tracking-widest text-zinc-700">
+              {shazam.status === "idle" ? "Первое распознавание через 8 сек после старта" : "Слушаю..."}
+            </div>
+          )}
+        </div>
+      )}
+
       {/* ─── Музыкальный анализ ─── */}
       <div className="grid grid-cols-2 gap-2">
         <div className="p-2.5 bg-zinc-900 border rounded flex flex-col gap-1"
@@ -1303,12 +1369,14 @@ function AutoScenePanel() {
           <div className="font-display text-[9px] tracking-widest text-zinc-600 mb-2">TRACK FEATURES</div>
           <div className="grid grid-cols-2 gap-x-3 gap-y-1">
             {[
-              { label: "KICK",     value: trackFeatures.kick_density,     color: "#ef4444" },
-              { label: "BASS",     value: trackFeatures.bass_energy,      color: "#3b82f6" },
-              { label: "SNARE",    value: trackFeatures.snare_density,    color: "#f97316" },
-              { label: "VOCAL",    value: trackFeatures.vocal_presence,   color: "#22c55e" },
+              { label: "KICK",     value: trackFeatures.kick_density,        color: "#ef4444" },
+              { label: "BASS",     value: trackFeatures.bass_energy,         color: "#3b82f6" },
+              { label: "SNARE",    value: trackFeatures.snare_density,       color: "#f97316" },
+              { label: "VOCAL",    value: trackFeatures.vocal_presence,      color: "#22c55e" },
               { label: "BRIGHT",   value: trackFeatures.spectral_brightness, color: "#06b6d4" },
-              { label: "DROP %",   value: trackFeatures.drop_probability, color: "#a855f7" },
+              { label: "DROP %",   value: trackFeatures.drop_probability,    color: "#a855f7" },
+              { label: "FLUX",     value: trackFeatures.spectral_flux,       color: "#e879f9" },
+              { label: "ONSET",    value: trackFeatures.onset_strength,      color: "#fbbf24" },
             ].map(({ label, value, color }) => (
               <div key={label} className="flex items-center gap-2">
                 <span className="font-display text-[8px] tracking-widest text-zinc-600 w-10">{label}</span>

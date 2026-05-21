@@ -95,3 +95,32 @@ export const artnetApi = {
       body: JSON.stringify({ ip, port, universe }),
     }),
 };
+
+// ─── Shazam ───────────────────────────────────────────────────────────────────
+
+export interface ShazamTrack {
+  title: string;
+  artist: string;
+  genre: string;
+  bpm: number;
+  key: string;
+  tempo: string;
+  cover_url: string;
+  shazam_url: string;
+  spotify_url: string;
+  apple_url: string;
+  shazam_id: string;
+}
+
+export interface ShazamResult {
+  matched: boolean;
+  track: ShazamTrack | null;
+}
+
+export const shazamApi = {
+  recognize: (audio_b64: string) =>
+    req<ShazamResult>("shazam", "/", {
+      method: "POST",
+      body: JSON.stringify({ audio_b64 }),
+    }),
+};

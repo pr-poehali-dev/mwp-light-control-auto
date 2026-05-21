@@ -1,0 +1,28 @@
+{
+  "tests": [
+    {
+      "name": "OPTIONS preflight",
+      "method": "OPTIONS",
+      "path": "/",
+      "expectedStatus": 200
+    },
+    {
+      "name": "Missing audio_b64",
+      "method": "POST",
+      "path": "/",
+      "body": {},
+      "expectedStatus": 400,
+      "expectedBody": { "error": "audio_b64 is required" },
+      "bodyMatcher": "partial"
+    },
+    {
+      "name": "No API key — valid b64 provided",
+      "method": "POST",
+      "path": "/",
+      "body": { "audio_b64": "AAAA" },
+      "expectedStatus": 500,
+      "expectedBody": { "error": "RAPIDAPI_KEY not configured" },
+      "bodyMatcher": "partial"
+    }
+  ]
+}
