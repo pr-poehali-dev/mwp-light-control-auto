@@ -2,8 +2,8 @@ import { useState, useEffect, useCallback, useRef } from "react";
 import Icon from "@/components/ui/icon";
 import { useWebAudio } from "@/hooks/useWebAudio";
 import type { MoodType, TrackStructure } from "@/hooks/useWebAudio";
-import { generateScene, getDefaultSceneFixtures } from "@/hooks/useSceneEngine";
-import type { GeneratedScene, FixtureInScene, EventType, VenueSize, ShowPolicy, DirectorMode } from "@/hooks/useSceneEngine";
+import { generateScene, getDefaultSceneFixtures, getSmallRigFixtures, validateFixtures, nextChannel } from "@/hooks/useSceneEngine";
+import type { GeneratedScene, FixtureInScene, FixtureGroup, EventType, VenueSize, ShowPolicy, DirectorMode } from "@/hooks/useSceneEngine";
 import { presetsApi, historyApi, settingsApi, artnetApi, type ApiPreset, type ApiEvent, type ApiSettings } from "@/lib/api";
 
 // ─── Types ───────────────────────────────────────────────────────────────────
@@ -1703,28 +1703,204 @@ function AutoScenePanel() {
           <Icon name="Send" size={11} />
           ОТПРАВИТЬ СЦЕНУ
         </button>
-        <button
-          onClick={() => setFixtures(getDefaultSceneFixtures())}
-          className="px-3 py-2 font-display text-[10px] tracking-widest border border-zinc-800 text-zinc-600 hover:text-zinc-400 rounded transition-all"
-          title="Сбросить список приборов">
-          <Icon name="RotateCcw" size={11} />
-        </button>
       </div>
 
-      {/* ─── Приборы в сцене ─── */}
-      <div className="p-2.5 bg-zinc-900 border border-zinc-800 rounded">
-        <div className="font-display text-[9px] tracking-widest text-zinc-600 mb-1.5">ПРИБОРЫ ({fixtures.length})</div>
-        <div className="space-y-0.5 max-h-28 overflow-y-auto">
-          {fixtures.map((f, idx) => (
-            <div key={f.id} className="flex items-center gap-2 text-[9px]">
-              <span className="font-mono-tech text-zinc-700 w-3">{idx + 1}</span>
-              <span className="font-mono-tech text-zinc-500 flex-1 truncate">{f.name}</span>
-              <span className="font-display tracking-widest text-zinc-700">{f.type}</span>
-              <span className="font-mono-tech text-zinc-700">CH{f.dmxStartChannel}</span>
-            </div>
-          ))}
+      {/* ─── Конфигуратор приборов ─── */}
+      <FixtureConfigurator fixtures={fixtures} onFixturesChange={setFixtures} scene={scene} />
+    </div>
+  );
+}
+
+// ─── Конфигуратор приборов (вынесен отдельно) ────────────────────────────────
+
+const FIXTURE_TYPE_OPTIONS = [
+  { value: "LED Par",          label: "LED Par (8ch)",        channels: 8  },
+  { value: "LED Par 4ch",      label: "LED Par (4ch)",        channels: 4  },
+  { value: "Moving Head",      label: "Moving Head (16ch)",   channels: 16 },
+  { value: "Moving Head Wash", label: "MH Wash (16ch)",        channels: 16 },
+  { value: "Strobe",           label: "Strobe (5ch)",         channels: 5  },
+  { value: "Spot",             label: "Spot (8ch)",           channels: 8  },
+  { value: "Wash",             label: "Wash (7ch)",           channels: 7  },
+  { value: "Laser",            label: "Laser (6ch)",          channels: 6  },
+  { value: "Hazer",            label: "Hazer/Fog (3ch)",      channels: 3  },
+  { value: "LED Bar",          label: "LED Bar (4ch)",        channels: 4  },
+];
+
+const GROUP_COLORS: Record<FixtureGroup, string> = {
+  front: "#06b6d4", mid: "#a855f7", back: "#ef4444",
+  side: "#22c55e", effect: "#f59e0b", fill: "#3b82f6",
+};
+
+function FixtureConfigurator({
+  fixtures,
+  onFixturesChange,
+  scene,
+}: {
+  fixtures: FixtureInScene[];
+  onFixturesChange: (f: FixtureInScene[]) => void;
+  scene: GeneratedScene | null;
+}) {
+  const [open, setOpen]         = useState(false);
+  const [addName, setAddName]   = useState("");
+  const [addType, setAddType]   = useState("LED Par");
+  const [addCh, setAddCh]       = useState(nextChannel(fixtures));
+  const [addChs, setAddChs]     = useState(8);
+  const [addGroup, setAddGroup] = useState<FixtureGroup>("mid");
+
+  const warnings = validateFixtures(fixtures);
+
+  // Синхронизируем стартовый канал с реальной позицией
+  const suggestedCh = nextChannel(fixtures);
+
+  const addFixture = () => {
+    if (addCh < 1 || addCh > 512 || addChs < 1) return;
+    const id = fixtures.length > 0 ? Math.max(...fixtures.map(f => f.id)) + 1 : 1;
+    onFixturesChange([...fixtures, {
+      id, name: addName.trim() || `${addType} ${id}`,
+      type: addType, dmxStartChannel: addCh,
+      channels: addChs, group: addGroup,
+    }]);
+    setAddName("");
+    setAddCh(addCh + addChs);
+  };
+
+  const removeFixture = (id: number) => {
+    onFixturesChange(fixtures.filter(f => f.id !== id));
+  };
+
+  return (
+    <div className="bg-zinc-900 border border-zinc-800 rounded overflow-hidden">
+      {/* Заголовок */}
+      <button className="w-full flex items-center justify-between px-2.5 py-2 hover:bg-zinc-800/40 transition-colors"
+        onClick={() => setOpen(v => !v)}>
+        <div className="flex items-center gap-2">
+          <span className="font-display text-[9px] tracking-widest text-zinc-500">
+            ПРИБОРЫ ({fixtures.length})
+          </span>
+          {warnings.length > 0 && (
+            <span className="font-mono-tech text-[8px] text-red-400">
+              ⚠ {warnings.length} конфликт{warnings.length > 1 ? "а" : ""}
+            </span>
+          )}
+          {scene && (
+            <span className="font-mono-tech text-[8px] text-zinc-700">
+              CH1-{Math.max(...fixtures.map(f => f.dmxStartChannel + f.channels - 1), 0)}
+            </span>
+          )}
         </div>
-      </div>
+        <div className="flex items-center gap-2">
+          <button onClick={e => { e.stopPropagation(); onFixturesChange(getDefaultSceneFixtures()); }}
+            className="font-display text-[7px] tracking-widest text-zinc-700 hover:text-amber-400 px-1.5 py-0.5 border border-zinc-800 rounded transition-colors"
+            title="30 приборов (клуб)">30×RIG</button>
+          <button onClick={e => { e.stopPropagation(); onFixturesChange(getSmallRigFixtures()); }}
+            className="font-display text-[7px] tracking-widest text-zinc-700 hover:text-cyan-400 px-1.5 py-0.5 border border-zinc-800 rounded transition-colors"
+            title="10 приборов (малый риг)">10×RIG</button>
+          <Icon name={open ? "ChevronUp" : "ChevronDown"} size={11} style={{ color: "#52525b" }} />
+        </div>
+      </button>
+
+      {open && (
+        <div className="border-t border-zinc-800">
+          {/* Предупреждения о конфликтах */}
+          {warnings.length > 0 && (
+            <div className="px-2.5 py-2 border-b border-zinc-800 space-y-0.5">
+              {warnings.map((w, i) => (
+                <div key={i} className="font-mono-tech text-[8px] text-red-400">{w}</div>
+              ))}
+            </div>
+          )}
+
+          {/* Список приборов */}
+          <div className="max-h-48 overflow-y-auto">
+            {fixtures.map((f, idx) => {
+              const fs = scene?.fixtureStates.find(s => s.fixtureId === f.id);
+              const col = GROUP_COLORS[f.group ?? "mid"];
+              return (
+                <div key={f.id}
+                  className="flex items-center gap-1.5 px-2.5 py-1 border-b border-zinc-800/50 hover:bg-zinc-800/30 transition-colors">
+                  {/* Номер */}
+                  <span className="font-mono-tech text-[8px] text-zinc-700 w-4 shrink-0">{idx + 1}</span>
+                  {/* Индикатор активности */}
+                  <div className="w-1.5 h-1.5 rounded-full shrink-0"
+                    style={{
+                      background: fs && fs.intensity > 0 ? fs.color : "#27272a",
+                      boxShadow: fs && fs.intensity > 0 ? `0 0 4px ${fs.color}` : "none",
+                    }} />
+                  {/* Название */}
+                  <span className="font-mono-tech text-[9px] text-zinc-400 flex-1 truncate">{f.name}</span>
+                  {/* Тип */}
+                  <span className="font-display text-[7px] tracking-widest shrink-0" style={{ color: col }}>
+                    {f.group?.toUpperCase() ?? "MID"}
+                  </span>
+                  {/* Каналы */}
+                  <span className="font-mono-tech text-[8px] text-zinc-600 shrink-0 w-16 text-right">
+                    CH{f.dmxStartChannel}–{f.dmxStartChannel + f.channels - 1}
+                  </span>
+                  {/* Яркость если идёт сцена */}
+                  {fs && (
+                    <span className="font-mono-tech text-[8px] shrink-0 w-8 text-right" style={{ color: fs.color }}>
+                      {fs.intensity}%
+                    </span>
+                  )}
+                  {/* Удалить */}
+                  <button onClick={() => removeFixture(f.id)}
+                    className="shrink-0 text-zinc-700 hover:text-red-500 transition-colors ml-1">
+                    <Icon name="X" size={10} />
+                  </button>
+                </div>
+              );
+            })}
+          </div>
+
+          {/* Добавить прибор */}
+          <div className="p-2.5 border-t border-zinc-800 space-y-2">
+            <div className="font-display text-[8px] tracking-widest text-zinc-600">ДОБАВИТЬ ПРИБОР</div>
+            <div className="grid grid-cols-2 gap-1.5">
+              <input value={addName} onChange={e => setAddName(e.target.value)}
+                placeholder="Название..."
+                className="col-span-2 bg-zinc-800 border border-zinc-700 rounded px-2 py-1 text-[9px] font-mono-tech text-zinc-300 focus:outline-none focus:border-cyan-500/50" />
+              <select value={addType}
+                onChange={e => {
+                  const found = FIXTURE_TYPE_OPTIONS.find(o => o.value === e.target.value);
+                  setAddType(e.target.value);
+                  if (found) setAddChs(found.channels);
+                }}
+                className="bg-zinc-800 border border-zinc-700 rounded px-1.5 py-1 text-[9px] font-display tracking-widest text-zinc-300 focus:outline-none cursor-pointer">
+                {FIXTURE_TYPE_OPTIONS.map(o => (
+                  <option key={o.value} value={o.value}>{o.label}</option>
+                ))}
+              </select>
+              <select value={addGroup} onChange={e => setAddGroup(e.target.value as FixtureGroup)}
+                className="bg-zinc-800 border border-zinc-700 rounded px-1.5 py-1 text-[9px] font-display tracking-widest text-zinc-300 focus:outline-none cursor-pointer">
+                {(["front","mid","back","side","effect","fill"] as FixtureGroup[]).map(g => (
+                  <option key={g} value={g}>{g.toUpperCase()}</option>
+                ))}
+              </select>
+              <div className="flex items-center gap-1">
+                <span className="font-display text-[7px] tracking-widest text-zinc-600 shrink-0">CH</span>
+                <input type="number" min={1} max={512} value={addCh}
+                  onChange={e => setAddCh(+e.target.value)}
+                  className="flex-1 bg-zinc-800 border border-zinc-700 rounded px-1.5 py-1 text-[9px] font-mono-tech text-zinc-300 focus:outline-none w-0" />
+              </div>
+              <div className="flex items-center gap-1">
+                <span className="font-display text-[7px] tracking-widest text-zinc-600 shrink-0">×CH</span>
+                <input type="number" min={1} max={32} value={addChs}
+                  onChange={e => setAddChs(+e.target.value)}
+                  className="flex-1 bg-zinc-800 border border-zinc-700 rounded px-1.5 py-1 text-[9px] font-mono-tech text-zinc-300 focus:outline-none w-0" />
+              </div>
+            </div>
+            <div className="flex gap-1.5">
+              <button onClick={addFixture}
+                className="flex-1 py-1.5 font-display text-[9px] tracking-widest border border-cyan-500/40 text-cyan-400 rounded hover:bg-cyan-500/10 transition-colors">
+                + ДОБАВИТЬ
+              </button>
+              <div className="font-mono-tech text-[8px] text-zinc-700 flex items-center px-2">
+                авто CH{suggestedCh}
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
